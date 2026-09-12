@@ -10,10 +10,10 @@ try {
     // Registering in one server while a global copy still exists makes every command show up twice, so clear the global scope.
     await rest.put(Routes.applicationGuildCommands(env.DISCORD_CLIENT_ID, env.DISCORD_GUILD_ID), { body: commandJSON });
     await rest.put(global, { body: [] });
-    console.log('Registered /trade, /connect, /disconnect and /find trades in the configured server and removed any global copy.');
+    console.log('Registered /trade, /connect and /disconnect in the configured server and removed any global copy.');
   } else {
     await rest.put(global, { body: commandJSON });
-    console.log('Registered /trade, /connect, /disconnect and /find trades globally. If commands appear twice in a server, set DISCORD_GUILD_ID and register again, or remove the server-scoped copy.');
+    console.log('Registered /trade, /connect and /disconnect globally. If commands appear twice in a server, set DISCORD_GUILD_ID and register again, or remove the server-scoped copy.');
   }
 } catch {
   console.error('Command registration failed. Check DISCORD_TOKEN, DISCORD_CLIENT_ID and DISCORD_GUILD_ID in .env; ensure the bot is installed in the server.');

@@ -2,7 +2,7 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown, ModalBuilder, StringSelectMenuBuilder,
   TextInputBuilder, TextInputStyle, type BaseMessageOptions,
 } from 'discord.js';
-import { alertHourlyCap, defaults as defaultPreferences, effectiveValue, idSchema, modeSchema, UserError, type Item, type Mode, type Preferences, type UserProfile } from './domain.js';
+import { alertHourlyCap, defaults as defaultPreferences, effectiveValue, idSchema, modeSchema, RAP_TRADE_PCT, UserError, type Item, type Mode, type Preferences, type TradeKind, type UserProfile } from './domain.js';
 import { downgradeWindow, upgradeWindow, type Evaluation, type PricedCopy, type Recommendation } from './engine.js';
 import type { ArchiveStats, SearchResult } from './search.js';
 import { formatRange, formatMixedRange, mixedRangeText, type Range } from './amounts.js';
@@ -308,6 +308,19 @@ const coverageLine = (c: Coverage) => {
 };
 /** An item the user could give away in downgrade mode. */
 export interface GiveChoice { id: number; name: string; value: number }
+/** The finder's trade-kind dropdown, in the user's terms. */
+export const TRADE_KINDS: { value: TradeKind; label: string; emoji: string; description: string }[] = [
+  { value: 'any', label: 'Value and RAP trades', emoji: '🔀', description: 'Every trade, whatever its items are priced by' },
+  { value: 'value', label: 'Value trades', emoji: '💎', description: `Under ${RAP_TRADE_PCT}% of the value on the table is RAP-only items` },
+  { value: 'rap', label: 'RAP trades', emoji: '📊', description: `${RAP_TRADE_PCT}% or more of the value on the table is RAP-only items (no Rolimons value)` },
+];
+export const tradeKindText = (kind: TradeKind): string => TRADE_KINDS.find(k => k.value === kind)?.label ?? 'Value and RAP trades';
+/** Mode choices for the finder's dropdown: bare names, one line each. */
+const MODE_CHOICES: { value: FindMode; description: string }[] = [
+  { value: 'both', description: 'Upgrades and downgrades in one search' },
+  { value: 'upgrade', description: 'Several of my items for one better item' },
+  { value: 'downgrade', description: 'One of my items for several smaller ones' },
+];
 export type FindMode = 'upgrade' | 'downgrade' | 'both';
 export const findMode = (q: SearchQuery): FindMode => (q.mode === 'downgrade' ? 'downgrade' : q.mode === 'upgrade' ? 'upgrade' : 'both');
 /** The user's loss/gain window in words. An upgrade's loss is its overpay, which has a window of its own. */
@@ -332,14 +345,19 @@ export function findPanel(query: SearchQuery, user: UserProfile, items?: Map<num
     .setDescription(note ?? null)
     .addFields(
       { name: '🎛️ Mode', value: `${MODE_ICON[mode]} ${cap(mode)}`, inline: true },
+      { name: '🏷️ Trade kind', value: tradeKindText(p.tradeKind), inline: true },
       { ...selection, inline: true },
       { name: '📐 Loss / gain', value: lossGainText(p), inline: true },
       { name: '💸 Value of what I receive', value: receiveRangeText(p, affordable), inline: true },
       { name: '🎚️ Filters', value: gainSummary(p), inline: true },
       { name: '📡 Trade ad archive', value: coverageLine(coverage) },
     )
-  const modes = (['both', 'upgrade', 'downgrade'] as const).map(m =>
-    button(ids.build('fq', 'mode', m, m === mode || (m !== 'downgrade' && mode !== 'downgrade') ? targetEnc : '-', results), cap(m), mode === m ? ButtonStyle.Primary : ButtonStyle.Secondary, MODE_ICON[m], mode === m));
+  // Mode and trade kind sit in two dropdowns, one above the other; the chosen mode travels in the custom ID so the
+  // handler can tell whether the targets still apply (they are dropped when switching into or out of downgrade).
+  const modeMenu = new StringSelectMenuBuilder().setCustomId(ids.build('fq', 'mode', mode, targetEnc, results)).setPlaceholder('🎛️ Mode')
+    .addOptions(MODE_CHOICES.map(m => ({ label: cap(m.value), value: m.value, emoji: MODE_ICON[m.value], description: m.description, default: m.value === mode })));
+  const kindMenu = new StringSelectMenuBuilder().setCustomId(ids.build('fq', 'kind', mode, targetEnc, results)).setPlaceholder('🏷️ Trade kind')
+    .addOptions(TRADE_KINDS.map(k => ({ label: k.label, value: k.value, emoji: k.emoji, description: clip(k.description, 100), default: k.value === p.tradeKind })));
   const afford = button(ids.build('fq', 'afford', mode, targetEnc, results), p.affordable ? 'Affordable: on' : 'Affordable: off', p.affordable ? ButtonStyle.Success : ButtonStyle.Danger, '💸');
   let menu: StringSelectMenuBuilder;
   if (pickTargets) {
@@ -355,7 +373,9 @@ export function findPanel(query: SearchQuery, user: UserProfile, items?: Map<num
       .addOptions(options.length ? options : [{ label: 'Nothing available', value: '-', description: 'Link an account with public, non-projected limiteds' }]).setDisabled(!options.length);
   }
   const ready = pickTargets || query.targetIds.length > 0;
-  return message(embed, row(...modes),
+  return message(embed,
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(modeMenu),
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(kindMenu),
     new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
     row(button(ids.build('find', mode, targetEnc, results), pickTargets ? 'Find trades' : 'Find bundles for my item', ButtonStyle.Success, '🚀', !ready), afford,
       button(ids.build('sfiltersmodal', mode, targetEnc, results), 'Filters', ButtonStyle.Secondary, '🎚️'),
@@ -614,7 +634,7 @@ export function helpMessage() {
     .addFields(
       { name: '1️⃣ Link', value: '🔗 `/connect` connects your Roblox session for sending. `/trade link` tracks a public inventory without sending access. `/disconnect` removes the saved session.', inline: false },
       { name: '2️⃣ Set up', value: '⚙️ `/trade settings` — your account, filters and lists · 💰 `/trade profit` — how much profit or loss you will take.', inline: false },
-      { name: '3️⃣ Search', value: '🔎 `/find trades` or `/trade find` — pick a mode and target, then press Find trades. Review an offer and click its numbered Place Trade button to send it.', inline: false },
+      { name: '3️⃣ Search', value: '🔎 `/trade find` — pick a mode, a trade kind (value, RAP or both) and a target, then press Find trades. Review an offer and click its numbered Place Trade button to send it.', inline: false },
       { name: '4️⃣ Wanted items', value: '⭐ `/trade watch` saves the items you want to receive and per-item profit rules.', inline: false },
       { name: '5️⃣ Alerts', value: '🔔 `/trade alerts` — recommendation DMs and how many per check · 🎒 Inventory DMs recap every trade, sale or purchase.', inline: false },
       { name: 'More', value: '🎒 `/trade inventory` shows your items · 🗑️ `/trade delete` deletes your data.', inline: false },
@@ -637,7 +657,7 @@ export function connectModal() {
 }
 export function connectedMessage(account: { id: number; name: string }) {
   return message(new EmbedBuilder().setColor(Colors.success).setTitle(`Connected ${escapeMarkdown(account.name)}`)
-    .setDescription('Your session is saved encrypted. Use **/find trades**, review an offer, then click **Place Trade** to send it.\n\n**/disconnect** removes the saved session. To revoke it on Roblox, log out that session in Roblox settings.'), row(nav.find()));
+    .setDescription('Your session is saved encrypted. Use **/trade find**, review an offer, then click **Place Trade** to send it.\n\n**/disconnect** removes the saved session. To revoke it on Roblox, log out that session in Roblox settings.'), row(nav.find()));
 }
 export function disconnectedMessage() {
   return message(new EmbedBuilder().setColor(Colors.success).setTitle('Roblox session removed')

@@ -9,7 +9,7 @@ Every reply is a private, styled Discord embed with buttons. `/connect` accepts 
 ## Features
 
 - **Exact ad matches and generated counteroffers** from the recent Rolimons trade-ad feed, verified against both public inventories down to the unique copy ID.
-- **Upgrades, downgrades and swaps** judged on value alone (RAP shown for reference), with configurable profit range, overpay, partner-loss, demand and ad-age filters; projected items are always excluded.
+- **Upgrades, downgrades and swaps** judged on value alone (RAP shown for reference), with configurable profit range, overpay, partner-loss, demand and ad-age filters; projected items are always excluded. A **trade kind** dropdown keeps value trades and RAP trades (30% or more of the value on the table in items with no Rolimons value) apart.
 - **Inventory DMs** (toggle in Settings): whenever copies leave or join your public inventory — a trade completes, an item sells, you buy one — you get a card of what went out, what came in and the value gained or lost.
 - **Wanted items** with per-item profit rules, a paged inventory view, and opt-in recommendation DMs deduplicated for 24 hours.
 - **Interactive UI**: link your account from a form, switch mode and demand with buttons and a select menu, jump between the settings, profit and inventory panels, re-run a search, or re-check a specific exchange.
@@ -21,7 +21,6 @@ Rendered from synthetic data with `npm run screenshots`; they show the real embe
 
 | `/connect` | Private session-cookie form. Verifies your identity and trade eligibility, then enables Place Trade. |
 | `/disconnect` | Removes the saved Roblox session and disables sending. |
-| `/find trades` | Alias for `/trade find`, including numbered Place Trade buttons. |
 | `/trade help` | `/trade profit` |
 | --- | --- |
 | ![Help panel with numbered steps and a Link Roblox account button](docs/screenshots/help.png) | ![Trade profit panel with the loss you accept, profit range, per-item rules and overpay caps](docs/screenshots/profit.png) |
@@ -74,7 +73,7 @@ The bot process must keep running for alerts. In Discord, run:
 /trade settings  → click a mode, pick demand
 /trade profit    → press ✏️ Edit profit / loss
 /trade watch     → press ⭐ Add wanted item
-/find trades     → choose mode and target, search, then review and click Place Trade
+/trade find      → choose mode, trade kind and target, search, then review and click Place Trade
 /trade alerts    → press 🔔 Turn alerts on
 ```
 
@@ -90,7 +89,7 @@ Every command takes **no options**. Run it and a private panel appears; everythi
 | --- | --- |
 | `/trade help` | 👋 Getting-started panel with shortcut buttons to every other panel. |
 | `/trade link` | 🔗 Form for a Roblox username or numeric user ID. Changing accounts resets settings and disables alerts. |
-| `/trade find` | 🔎 Trade finder with three modes. **Both** (default): one search covering upgrades and downgrades, each ranked by its own rule. **Upgrade**: pick or type items you want (several at once); the bot screens every archived ad for people offering them, builds bundles of up to 4 of your items for 1 of theirs, slight losses first because sellers accept them. **Downgrade**: pick one of your items to give away; the bot screens every ad for bundles, closest to +10% first. Every mode uses your own loss floor from `/trade profit`; gains are kept to a realistic +10% unless the seller's ad asks for exactly the items you would give. In Both mode the list alternates upgrade-shaped and downgrade-shaped sellers. **Affordable** limits what you receive to the band your items can pay for (cheapest copy up to your four most valuable together); type your own value range under Filters to replace that band. Any ad offering the item counts; seller tags and requests are only hints. Projected items never take part in the maths. Results are Rolimons-style cards with numbered **Place Trade** buttons and **Trade with …** browser links. **Filters** adds a downgrade profit range and an upgrade overpay range (each side a percent or a value), the receive value range and ad age. |
+| `/trade find` | 🔎 Trade finder. Two dropdowns sit at the top: **Mode** and **Trade kind**. Trade kind is *Value trades*, *RAP trades* or *Value and RAP trades* (default); a RAP item is one Rolimons has not assigned a value to, so its RAP stands in, and a trade is a **RAP trade** once RAP items make up 30% or more of the value on the table (both sides together), a **value trade** otherwise. The choice is saved and applies to alerts too. Three modes. **Both** (default): one search covering upgrades and downgrades, each ranked by its own rule. **Upgrade**: pick or type items you want (several at once); the bot screens every archived ad for people offering them, builds bundles of up to 4 of your items for 1 of theirs, slight losses first because sellers accept them. **Downgrade**: pick one of your items to give away; the bot screens every ad for bundles, closest to +10% first. Every mode uses your own loss floor from `/trade profit`; gains are kept to a realistic +10% unless the seller's ad asks for exactly the items you would give. In Both mode the list alternates upgrade-shaped and downgrade-shaped sellers. **Affordable** limits what you receive to the band your items can pay for (cheapest copy up to your four most valuable together); type your own value range under Filters to replace that band. Any ad offering the item counts; seller tags and requests are only hints. Projected items never take part in the maths. Results are Rolimons-style cards with numbered **Place Trade** buttons and **Trade with …** browser links. **Filters** adds a downgrade profit range and an upgrade overpay range (each side a percent or a value), the receive value range and ad age. |
 | `/trade profit` | 💰 How much profit or loss you will take on a trade: the loss you accept (gains are realistic, +10% at most, unless the ad asks for your exact items), a profit range and per-item profit rules. **Edit profit / loss** opens the form. Value-based only; projected items are always excluded. |
 | `/trade watch` | ⭐ Wanted items panel: add several items at once (comma separated names, acronyms or IDs), remove or clear through the menus, and set **per-item profit rules** (a profit range that applies whenever a trade brings that item in). Up to 100 wanted items, 25 rules; the remove menus take several picks at once. |
 | `/trade alerts` | 🔔 Everything about DMs: toggles for recommendation and inventory alerts, how many trades each check may send, the last DM and the last alert error. |
@@ -117,7 +116,7 @@ Roughly two of every three archived ads are a repost of an identical offer, so o
 
 ## Calculations and filters
 
-Every decision is made on **value** alone. For each item, value is the assigned Rolimons value; an item with no assigned value (Rose Amazeface, for example) counts its RAP as its value, and the UI labels it **value = RAP**. RAP totals are shown on every card for reference and never change a decision. Projected items are excluded from both sides of every calculation. None of this is a catalog purchase price or a cash valuation.
+Every decision is made on **value** alone. For each item, value is the assigned Rolimons value; an item with no assigned value (Rose Amazeface, for example) counts its RAP as its value, and the UI labels it **value = RAP**. Such RAP items decide a trade's **kind**: add up the value on both sides, and if 30% or more of it comes from RAP items the trade is a *RAP trade*, otherwise a *value trade*. The finder's trade-kind dropdown (`tradeKind`: `any`, `value` or `rap`) keeps only the kind you asked for, in searches and alerts alike. RAP totals are shown on every card for reference and never change a decision. Projected items are excluded from both sides of every calculation. None of this is a catalog purchase price or a cash valuation.
 
 ```text
 Value gain     = total received value − total given value

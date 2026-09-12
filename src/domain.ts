@@ -3,6 +3,13 @@ import { z } from 'zod';
 export const idSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 export const modeSchema = z.enum(['any', 'upgrade', 'downgrade']);
 export type Mode = z.infer<typeof modeSchema>;
+/**
+ * Which trades to look for. A "RAP item" has no assigned Rolimons value, so its RAP stands in; a trade is a "RAP trade"
+ * once RAP items make up at least `RAP_TRADE_PCT` of the value on the table, and a "value trade" otherwise.
+ */
+export const tradeKindSchema = z.enum(['any', 'value', 'rap']);
+export type TradeKind = z.infer<typeof tradeKindSchema>;
+export const RAP_TRADE_PCT = 30;
 /** One end of a shape-specific window: a percentage of what you give, or an absolute value. */
 export const boundSchema = z.object({ value: z.number().min(-1_000_000_000).max(1_000_000_000), pct: z.boolean() });
 export type Bound = z.infer<typeof boundSchema>;
@@ -44,6 +51,8 @@ export const preferencesSchema = z.object({
   /** How many trade DMs one alert check may send; set on the alerts panel next to the on/off toggle. */
   alertsPerScan: z.number().int().min(1).max(10).default(3),
   targetIds: z.array(idSchema).max(100).default([]),
+  /** Value trades, RAP trades or both; chosen from the finder's dropdown and applied to alerts as well. */
+  tradeKind: tradeKindSchema.default('any'),
 });
 export type Preferences = z.infer<typeof preferencesSchema>;
 /** Safety net behind `alertsPerScan`: a ceiling that scales with the chosen rate so a busy hour cannot flood a DM inbox. */
@@ -61,7 +70,7 @@ const FIELD_LABELS: Record<string, string> = {
   maxOverpayPct: 'Max overpay', maxPartnerLossPct: 'Max partner loss',
   minDemand: 'Minimum demand', maxRapValueRatio: 'Max RAP/value ratio',
   maxAdAgeMinutes: 'Max ad age', alertsPerScan: 'How many trades per check',
-  targetIds: 'Wanted items', affordable: 'Any item in your range',
+  targetIds: 'Wanted items', affordable: 'Any item in your range', tradeKind: 'Trade kind',
 };
 const limit = (n: unknown): string => (typeof n === 'number' ? n.toLocaleString('en-US') : String(n));
 /** What a rejected box accepts, in the same terms the form asked for it. */

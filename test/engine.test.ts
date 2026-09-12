@@ -16,6 +16,21 @@ test('upgrade calculates gains, overpay and counterparty loss with their correct
   assert.equal(partner.passes, true); assert.equal(partner.valueGain, 10); assert.equal(partner.overpayPct, 0);
   assert.ok(Math.abs(partner.partnerLossPct - 1000 / 100) < 1e-9);
 });
+test('a trade is a RAP trade once 30% of the value on the table comes from items with no Rolimons value', () => {
+  const rap = (id: number, value: number) => ({ assetId: id, userAssetId: id, onHold: false, item: item(id, value, { value: null }) });
+  // 50 of 190 (26%) is RAP-only: still a value trade, so only the 'rap' filter turns it away.
+  const mostlyValued = evaluate([rap(1, 50), copy(2, 50)], [copy(3, 90)], defaults());
+  assert.equal(mostlyValued.kind, 'value'); assert.ok(Math.abs(mostlyValued.rapShare - 5000 / 190) < 1e-9);
+  assert.equal(evaluate([rap(1, 50), copy(2, 50)], [copy(3, 90)], { ...defaults(), tradeKind: 'value' }).passes, true);
+  assert.match(evaluate([rap(1, 50), copy(2, 50)], [copy(3, 90)], { ...defaults(), tradeKind: 'rap' }).failures.join(' '), /value trade \(26% of the value/);
+  // 100 of 190 (53%) is RAP-only: a RAP trade, counted on both sides of the exchange.
+  const rapHeavy = evaluate([rap(1, 50), copy(2, 50)], [rap(3, 90)], defaults());
+  assert.equal(rapHeavy.kind, 'rap'); assert.match(rapHeavy.warnings.join(' '), /74% of this trade, so it is a rap trade/);
+  assert.match(evaluate([rap(1, 50), copy(2, 50)], [rap(3, 90)], { ...defaults(), tradeKind: 'value' }).failures.join(' '), /RAP trade \(74% of the value/);
+  assert.equal(evaluate([rap(1, 50), copy(2, 50)], [rap(3, 90)], { ...defaults(), tradeKind: 'rap' }).passes, true);
+  // Exactly on the line counts as RAP: 57 of 190 is 30%.
+  assert.equal(evaluate([rap(1, 57), copy(2, 43)], [copy(3, 90)], defaults()).kind, 'rap');
+});
 test('shapes that shuffle items without upgrading or downgrading are rejected outright', () => {
   const p = defaults();
   const copies = (n: number, each: number, from = 1) => Array.from({ length: n }, (_, i) => copy(from + i, each, from + i));

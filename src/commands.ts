@@ -7,7 +7,7 @@ import { SlashCommandBuilder } from 'discord.js';
 export const tradeCommand = new SlashCommandBuilder().setName('trade').setDescription('Find and evaluate Roblox limited item trades')
   .addSubcommand(s => s.setName('help').setDescription('👋 What the bot does and how to get started'))
   .addSubcommand(s => s.setName('link').setDescription('🔗 Track a public Roblox inventory (no password or cookie needed)'))
-  .addSubcommand(s => s.setName('find').setDescription('🔎 Pick a mode and target, then search recent trade ads for offers'))
+  .addSubcommand(s => s.setName('find').setDescription('🔎 Pick a mode, trade kind and target, then search recent trade ads and place trades'))
   .addSubcommand(s => s.setName('profit').setDescription('💰 Set how much profit or loss you are willing to take on a trade'))
   .addSubcommand(s => s.setName('watch').setDescription('⭐ Manage the wanted items used by searches and alerts'))
   .addSubcommand(s => s.setName('alerts').setDescription('🔔 Turn personal trade recommendation DMs on or off'))
@@ -18,6 +18,4 @@ export const tradeCommand = new SlashCommandBuilder().setName('trade').setDescri
 export const commandJSON = [tradeCommand.toJSON(),
   new SlashCommandBuilder().setName('connect').setDescription('Connect your Roblox session privately to send trades').toJSON(),
   new SlashCommandBuilder().setName('disconnect').setDescription('Remove your saved Roblox session and stop bot trade sending').toJSON(),
-  new SlashCommandBuilder().setName('find').setDescription('Find Roblox limited-item trades')
-    .addSubcommand(s => s.setName('trades').setDescription('Search trade offers and place a trade with your connected account')).toJSON(),
 ];

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { effectiveValue, type Bound, type Holding, type Inventory, type Item, type Preferences, type TradeAd } from './domain.js';
+import { effectiveValue, RAP_TRADE_PCT, type Bound, type Holding, type Inventory, type Item, type Preferences, type TradeAd } from './domain.js';
 
 export interface PricedCopy extends Holding { item: Item }
 export interface Totals { value: number; rap: number; demand: number; trend: number }
@@ -7,6 +7,10 @@ export interface Evaluation {
   give: PricedCopy[]; receive: PricedCopy[]; giving: Totals; receiving: Totals;
   valueGain: number; rapGain: number; valueGainPct: number; rapGainPct: number;
   overpayPct: number; partnerLossPct: number; score: number; mode: 'upgrade' | 'downgrade' | 'swap';
+  /** Share of the value on both sides that comes from items with no assigned Rolimons value (RAP standing in), 0–100. */
+  rapShare: number;
+  /** A RAP trade once `rapShare` reaches RAP_TRADE_PCT; a value trade otherwise. */
+  kind: 'value' | 'rap';
   passes: boolean; failures: string[]; warnings: string[];
 }
 export interface Recommendation extends Evaluation {
@@ -92,7 +96,14 @@ export function evaluate(give: PricedCopy[], receive: PricedCopy[], p: Preferenc
   const overpayPct = receiving.value > 0 ? 100 * Math.max(0, -valueGain) / receiving.value : 0;
   const partnerLossPct = receiving.value > 0 ? 100 * Math.max(0, valueGain) / receiving.value : 0;
   const mode = give.length > receive.length ? 'upgrade' : give.length < receive.length ? 'downgrade' : 'swap';
+  // What part of the trade rests on RAP: items Rolimons has not valued count their RAP as value, on either side.
+  const rapValue = [...give, ...receive].reduce((n, c) => n + (c.item.value === null ? effectiveValue(c.item) : 0), 0);
+  const rapShare = giving.value + receiving.value > 0 ? 100 * rapValue / (giving.value + receiving.value) : 0;
+  const kind = rapShare + 1e-9 >= RAP_TRADE_PCT ? 'rap' : 'value';
   const failures: string[] = [], warnings: string[] = [];
+  const share = `${Math.round(rapShare)}% of the value on the table is RAP-only items`;
+  if (p.tradeKind === 'value' && kind === 'rap') failures.push(`This is a RAP trade (${share}) and you asked for value trades.`);
+  if (p.tradeKind === 'rap' && kind === 'value') failures.push(`This is a value trade (${share}, under ${RAP_TRADE_PCT}%) and you asked for RAP trades.`);
   if (!give.length || !receive.length || give.length > 4 || receive.length > 4) failures.push('Each side must contain 1–4 copies.');
   if (new Set([...give, ...receive].map(c => c.userAssetId)).size !== give.length + receive.length) failures.push('A unique item copy appears more than once.');
   if ([...give, ...receive].some(c => c.onHold)) failures.push('An item is on hold.');
@@ -144,7 +155,7 @@ export function evaluate(give: PricedCopy[], receive: PricedCopy[], p: Preferenc
   if (receive.some(c => c.item.demand < p.minDemand)) failures.push(`Incoming demand is below ${p.minDemand}.`);
   // RAP is informational only: every decision above and the score below use value (or RAP standing in as value).
   const unvalued = [...give, ...receive].filter(c => c.item.value === null).map(c => c.item.name);
-  if (unvalued.length) warnings.push(`No assigned Rolimons value for ${[...new Set(unvalued)].join(', ')}: RAP counts as the value.`);
+  if (unvalued.length) warnings.push(`No assigned Rolimons value for ${[...new Set(unvalued)].join(', ')}: RAP counts as the value (${Math.round(rapShare)}% of this trade, so it is a ${kind} trade).`);
   if (receive.some(c => c.item.projected)) warnings.push('Incoming projected item: RAP may be inflated.');
   if (receive.some(c => c.item.hyped)) warnings.push('Incoming item is marked hyped.');
   if (receive.some(c => c.item.rare)) warnings.push('Incoming rare item: liquidity and negotiated prices can vary.');
@@ -154,7 +165,7 @@ export function evaluate(give: PricedCopy[], receive: PricedCopy[], p: Preferenc
   const score = Math.round((valueGainPct + 2 * (receiving.demand - giving.demand)
     + (receiving.trend - giving.trend) - penalty) * 100) / 100;
   return { give, receive, giving, receiving, valueGain, rapGain, valueGainPct, rapGainPct, overpayPct, partnerLossPct,
-    score, mode, passes: !failures.length, failures, warnings };
+    score, mode, rapShare, kind, passes: !failures.length, failures, warnings };
 }
 
 export function combinations<T>(pool: T[], max = 4): T[][] {

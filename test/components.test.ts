@@ -101,9 +101,17 @@ test('recommendation buttons re-check the exchange and re-run the search', async
 test('find panel changes mode, target and result count in place, then searches with those choices', async () => {
   const store = new Store(':memory:'); const user = profile(); user.preferences.targetIds = [30]; store.save(user);
   const bot = new Bot(store, new SearchService(finderProvider()));
-  const mode = component(ids.build('fq', 'mode', 'upgrade', '-', 3)); await bot.component(mode.i);
-  assert.equal(mode.calls[0]?.method, 'deferUpdate'); assert.match(json(mode.last()?.body), /Find trades/);
+  // Mode is a dropdown drawn with the current mode in its ID; picking a value redraws the panel with the new one.
+  const mode = component(ids.build('fq', 'mode', 'both', '-', 3), 'select', { values: ['upgrade'] }); await bot.component(mode.i);
+  assert.equal(mode.calls[0]?.method, 'deferUpdate'); assert.match(json(mode.last()?.body), /Find trades · ⬆️ Upgrade/);
+  assert.match(json(mode.last()?.body), /tf:fq:mode:upgrade:-:3/); assert.match(json(mode.last()?.body), /tf:fq:kind:upgrade:-:3/, 'the trade-kind dropdown sits next to the mode dropdown');
+  assert.doesNotMatch(json(mode.last()?.body), /tf:fq:mode:(both|upgrade|downgrade):-:3","label"/, 'modes are no longer buttons');
   const target = component(ids.build('fq', 'target', 'upgrade', 3), 'select', { values: [ids.encode(30)] }); await bot.component(target.i);
+  // Targets survive a switch between both and upgrade, and are dropped on the way into downgrade.
+  const keep = component(ids.build('fq', 'mode', 'upgrade', ids.encode(30), 3), 'select', { values: ['both'] }); await bot.component(keep.i);
+  assert.match(json(keep.last()?.body), new RegExp(`tf:find:both:${ids.encode(30)}:3`));
+  const drop = component(ids.build('fq', 'mode', 'upgrade', ids.encode(30), 3), 'select', { values: ['downgrade'] }); await bot.component(drop.i);
+  assert.match(json(drop.last()?.body), /tf:find:downgrade:-:3/);
   assert.match(json(target.last()?.body), /Item 30/); assert.match(json(target.last()?.body), new RegExp(`tf:find:upgrade:${ids.encode(30)}:3`));
   const typed = component(ids.build('target', 'upgrade', 1), 'modal', { fields: { item: 'I30' } }); await bot.component(typed.i);
   assert.match(json(typed.last()?.body), /Target set to \*\*Item 30\*\*/);
@@ -386,7 +394,7 @@ test('downgrade mode gives one chosen item for a seller bundle worth about +10%,
 test('affordable filter: auto band from own items, custom range from the form, and the Both mode mixes upgrades and downgrades', async () => {
   const store = new Store(':memory:'); const user = profile(); user.preferences.targetIds = [30]; store.save(user);
   const bot = new Bot(store, new SearchService(finderProvider()));
-  // Mode buttons are bare words; no explanation of what each mode is.
+  // Mode options are bare words; no long explanation of what each mode is.
   const panel = component(ids.build('fq', 'mode', 'upgrade', '-', 3)); await bot.component(panel.i);
   assert.match(json(panel.last()?.body), /"label":"Upgrade"/); assert.match(json(panel.last()?.body), /"label":"Downgrade"/); assert.match(json(panel.last()?.body), /"label":"Both"/);
   assert.doesNotMatch(json(panel.last()?.body), /Give up to|for \*\*1\*\* of theirs/); assert.match(json(panel.last()?.body), /Affordable: off/); assert.match(json(panel.last()?.body), /any value/);
@@ -414,6 +422,36 @@ test('affordable filter: auto band from own items, custom range from the form, a
   store.close();
 });
 
+test('trade-kind dropdown saves the choice and keeps RAP trades and value trades apart', async () => {
+  const store = new Store(':memory:'); const user = profile(); user.preferences.targetIds = [30]; store.save(user);
+  const provider = finderProvider();
+  // Items 10 and 20 (50 each) lose their Rolimons value: RAP stands in, so 100 of the 202 on the table (49%) is RAP-only.
+  provider.itemMap.set(10, { ...provider.itemMap.get(10)!, value: null }); provider.itemMap.set(20, { ...provider.itemMap.get(20)!, value: null });
+  const bot = new Bot(store, new SearchService(provider));
+  const panel = component(ids.build('fq', 'mode', 'both', '-', 3), 'select', { values: ['upgrade'] }); await bot.component(panel.i);
+  assert.match(json(panel.last()?.body), /"label":"Value and RAP trades","value":"any"[^\]]*"default":true/); assert.match(json(panel.last()?.body), /Trade kind/);
+  const value = component(ids.build('fq', 'kind', 'upgrade', '-', 3), 'select', { values: ['value'] }); await bot.component(value.i);
+  assert.equal(store.get('123')?.preferences.tradeKind, 'value'); assert.match(json(value.last()?.body), /"label":"Value trades","value":"value"[^\]]*"default":true/);
+  const miss = component(ids.build('find', 'upgrade', ids.encode(30), 1)); await bot.component(miss.i);
+  assert.match(json(miss.calls.find(c => c.method === 'editReply')?.body), /No sendable upgrades/, 'a 49% RAP trade is not a value trade');
+  bot['lastSearch'].clear();
+  const rap = component(ids.build('fq', 'kind', 'upgrade', '-', 3), 'select', { values: ['rap'] }); await bot.component(rap.i);
+  assert.equal(store.get('123')?.preferences.tradeKind, 'rap');
+  const hit = component(ids.build('find', 'upgrade', ids.encode(30), 1)); await bot.component(hit.i);
+  assert.match(json(hit.calls.find(c => c.method === 'editReply')?.body), /1 person you can trade with/);
+  bot['lastSearch'].clear();
+  // With only item 20 unvalued the RAP share is 25%: a value trade, so RAP mode drops it and value mode takes it.
+  provider.itemMap.set(10, { ...provider.itemMap.get(10)!, value: 50 });
+  const stillRap = component(ids.build('find', 'upgrade', ids.encode(30), 1)); await bot.component(stillRap.i);
+  assert.match(json(stillRap.calls.find(c => c.method === 'editReply')?.body), /No sendable upgrades/);
+  bot['lastSearch'].clear();
+  const back = component(ids.build('fq', 'kind', 'upgrade', '-', 3), 'select', { values: ['value'] }); await bot.component(back.i);
+  const ok = component(ids.build('find', 'upgrade', ids.encode(30), 1)); await bot.component(ok.i);
+  assert.match(json(ok.calls.find(c => c.method === 'editReply')?.body), /1 person you can trade with/);
+  const bad = component(ids.build('fq', 'kind', 'upgrade', '-', 3), 'select', { values: ['nonsense'] }); await bot.component(bad.i);
+  assert.match(json(bad.last()?.body), /\*\*Trade kind\*\*/); assert.equal(store.get('123')?.preferences.tradeKind, 'value', 'a rejected choice leaves the saved kind alone');
+  store.close();
+});
 test('picking "Any item in your range" on the finder opens a price-range form whose answer sets the receive range and turns Affordable on', async () => {
   const store = new Store(':memory:'); const user = profile(); user.preferences.targetIds = [30]; store.save(user);
   const bot = new Bot(store, new SearchService(finderProvider()));

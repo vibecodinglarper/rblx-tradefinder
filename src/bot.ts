@@ -71,7 +71,7 @@ export class Bot {
     try { if (i.deferred || i.replied) await i.editReply(payload); else await i.reply({ ...payload, flags: MessageFlags.Ephemeral }); } catch { /* Interaction expired. */ }
   }
   async handle(i: ChatInputCommandInteraction): Promise<void> {
-    if (!['trade', 'connect', 'disconnect', 'find'].includes(i.commandName)) return;
+    if (!['trade', 'connect', 'disconnect'].includes(i.commandName)) return;
     if (this.busy.has(i.user.id)) { await i.reply({ ...errorMessage('Your previous command is still running.'), flags: MessageFlags.Ephemeral }); return; }
     this.busy.add(i.user.id);
     try {
@@ -82,7 +82,7 @@ export class Bot {
         this.trading.cancelVerification(i.user.id);
         await i.editReply(disconnectedMessage()); return;
       }
-      const sub = i.commandName === 'find' ? 'find' : i.options.getSubcommand();
+      const sub = i.options.getSubcommand();
       // Forms must be the first response to an interaction, so they are shown before any deferral.
       if (sub === 'link') { await i.showModal(linkModal()); return; }
       await i.deferReply({ flags: MessageFlags.Ephemeral });
@@ -179,11 +179,11 @@ export class Bot {
     if (action === 'place') {
       const cached = this.results.get(user.discordId);
       if (!cached || cached.token !== args[0] || cached.robloxId !== user.robloxId || Date.now() - cached.at > Bot.RESULT_TTL) {
-        throw new UserError('This offer has expired or belongs to another search. Run /find trades again.');
+        throw new UserError('This offer has expired or belongs to another search. Run /trade find again.');
       }
       const index = args[1] && /^\d+$/.test(args[1]) ? Number(args[1]) : -1;
       const offer = listPage(cached.result, 0).entries.find(e => e.index === index)?.best;
-      if (!offer || args.length !== 2) throw new UserError('This offer is no longer available. Run /find trades again.');
+      if (!offer || args.length !== 2) throw new UserError('This offer is no longer available. Run /trade find again.');
       const tradeId = await this.trading.place(user, offer, cached.at + Bot.RESULT_TTL, async content => {
         await i.editReply({ content, embeds: [], components: [] });
       });
@@ -235,7 +235,16 @@ export class Bot {
       // Choosing "any" alongside specific items means the specific items.
       const picked = values.filter(v => v !== '-');
       if (field === 'afford') { user.preferences.affordable = !user.preferences.affordable; this.store.save(user); }
-      const query = field === 'mode' || field === 'afford' ? parseQuery(rest[0], rest[1], rest[2])
+      // The trade-kind dropdown is a saved preference, so alerts follow the same choice as the finder.
+      if (field === 'kind') { user.preferences = parsePreferences({ ...user.preferences, tradeKind: picked[0] ?? 'any' }); this.store.save(user); }
+      // The mode dropdown carries the mode it was drawn with; targets survive unless downgrade is entered or left.
+      const switched = (): SearchQuery => {
+        const [current = '-', targets = '-', results] = rest;
+        const next = picked[0] ?? current;
+        return parseQuery(next, next === current || (next !== 'downgrade' && current !== 'downgrade') ? targets : '-', results);
+      };
+      const query = field === 'mode' && i.isStringSelectMenu() ? switched()
+        : field === 'mode' || field === 'afford' || field === 'kind' ? parseQuery(rest[0], rest[1], rest[2])
         : field === 'target' ? parseQuery(rest[0], picked.length ? picked.join(',') : '-', rest[1])
         : field === 'give' ? parseQuery(rest[0], picked[0] ?? '-', rest[1])
         : parseQuery(...rest as [string?, string?, string?]);
@@ -287,7 +296,7 @@ export class Bot {
     throw new UserError('This button is no longer supported. Run the command again.');
   }
   private async execute(i: ChatInputCommandInteraction): Promise<void> {
-    const sub = i.commandName === 'find' ? 'find' : i.options.getSubcommand();
+    const sub = i.options.getSubcommand();
     if (sub === 'help') { await i.editReply(helpMessage()); return; }
     const user = this.profile(i.user.id);
     const items = () => this.itemNames();

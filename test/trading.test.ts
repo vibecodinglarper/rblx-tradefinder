@@ -214,7 +214,9 @@ test('Discord connect → find → Place Trade is private, bound to the search/a
     assert.deepEqual(connect.calls[0], { method: 'deferReply', body: { flags: MessageFlags.Ephemeral } });
     assert.equal(JSON.stringify(connect.calls).includes(secret), false);
     const alias = interaction(''); Object.assign(alias.fake, { commandName: 'find', options: { getSubcommand: () => 'trades' } });
-    await bot.handle(alias.fake as unknown as ChatInputCommandInteraction); assert.match(JSON.stringify(alias.calls), /Find trades/);
+    await bot.handle(alias.fake as unknown as ChatInputCommandInteraction); assert.equal(alias.calls.length, 0, 'the removed /find trades command is ignored');
+    const finder = interaction(''); Object.assign(finder.fake, { commandName: 'trade', options: { getSubcommand: () => 'find' } });
+    await bot.handle(finder.fake as unknown as ChatInputCommandInteraction); assert.match(JSON.stringify(finder.calls), /Find trades/);
     const find = interaction('tf:find:upgrade:u:3'); await bot.component(find.i);
     const output = JSON.stringify(find.calls); const placeId = output.match(/tf:place:[a-f0-9]+:0/)?.[0]; assert.ok(placeId);
     const wrong = interaction(placeId, undefined, '456'); store.link('456', 1, 'OtherDiscord'); await bot.component(wrong.i);
