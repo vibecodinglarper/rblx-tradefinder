@@ -121,7 +121,7 @@ export class Store {
   }
   session(discordId: string, robloxId: number): string {
     const row = this.db.prepare('SELECT roblox_id, ciphertext FROM roblox_sessions WHERE discord_id = ?').get(discordId) as { roblox_id: number; ciphertext: string } | undefined;
-    if (!row || row.roblox_id !== robloxId) throw new UserError('Use /connect to authorize sending trades from this Roblox account first.');
+    if (!row || row.roblox_id !== robloxId) throw new UserError('Use /connect to verify tradable inventory and authorize trades from this Roblox account.');
     try {
       const data = Buffer.from(row.ciphertext, 'base64');
       const decipher = createDecipheriv('aes-256-gcm', this.requireCredentialKey(), data.subarray(0, 12));

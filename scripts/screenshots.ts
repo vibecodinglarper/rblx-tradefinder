@@ -24,7 +24,7 @@ const items = new Map([
   item(1235488, 'Red Sparkle Time Fedora', 'RSTF', null, 96_000, { demand: 1, projected: true }),
   item(16630147, 'Deadly Dark Dominus', 'DDD', 900_000, 905_000, { demand: 4, rare: true }),
 ].map(i => [i.id, i]));
-const inventory = (userId: number, ids: number[]): Inventory => ({ userId, holdings: ids.map((assetId, i) => ({ assetId, userAssetId: userId * 1000 + i, onHold: false })), fetchedAt: Date.now() - 40_000 });
+const inventory = (userId: number, ids: number[]): Inventory => ({ userId, holdings: ids.map((assetId, i) => ({ assetId, userAssetId: userId * 1000 + i, onHold: false, tradable: true })), fetchedAt: Date.now() - 40_000 });
 const ad: TradeAd = { id: 48211397, userId: 2, username: 'LimitedFlipper', createdAt: Date.now() - 6 * 60_000, offering: [1365767], requesting: [1029025, 1031429], tags: [], offeringRobux: 0, requestingRobux: 0 };
 const provider: DataProvider = {
   async items() { return { data: items, fetchedAt: Date.now() - 20_000 }; },

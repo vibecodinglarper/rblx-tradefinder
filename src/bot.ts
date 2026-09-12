@@ -452,7 +452,7 @@ export class Bot {
     return inventoryAlertsMessage(user, copies);
   }
   private async inventory(user: UserProfile, view: InventoryView = 'grid', page = 0) {
-    const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId), this.search.provider.items()]);
+    const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId, undefined, user), this.search.provider.items()]);
     const available = priced(inventory, items.data);
     const total = totals(available);
     const entries = groupInventory(inventory, items.data);
@@ -462,7 +462,7 @@ export class Bot {
       const thumbnails = await this.search.provider.thumbnails?.(paged.items.map(e => e.assetId)).catch(() => new Map<number, Buffer>()) ?? new Map<number, Buffer>();
       files.push(new AttachmentBuilder(await renderInventoryGrid(paged.items, thumbnails), { name: 'inventory.png' }));
     }
-    const message = inventoryMessage(user, { view, ...paged, entries: paged.items, total: entries.length, copies: inventory.holdings.length, value: total.value, rap: total.rap }, await this.avatar(user.robloxId));
+    const message = inventoryMessage(user, { view, ...paged, entries: paged.items, total: entries.length, copies: inventory.holdings.length, value: total.value, rap: total.rap, note: inventory.tradabilityError }, await this.avatar(user.robloxId));
     return { ...message, files };
   }
   private cooldown(discordId: string): void {
@@ -503,7 +503,7 @@ export class Bot {
   }
   /** Items the user can give away in downgrade mode: available, non-projected, priced; most valuable first. */
   private async giveChoices(user: UserProfile): Promise<GiveChoice[]> {
-    const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId), this.search.provider.items()]);
+    const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId, undefined, user), this.search.provider.items()]);
     const seen = new Map<number, GiveChoice>();
     for (const c of priced(inventory, items.data)) if (!seen.has(c.assetId)) seen.set(c.assetId, { id: c.assetId, name: c.item.name, value: effectiveValue(c.item) });
     return [...seen.values()].sort((a, b) => b.value - a.value).slice(0, 25);
@@ -519,7 +519,7 @@ export class Bot {
   /** The band this user's items can pay for, shown on the find panel; an inventory outage just hides the numbers. */
   private async affordable(user: UserProfile, maxGainPct: number): Promise<{ min: number; max: number } | null> {
     try {
-      const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId), this.search.provider.items()]);
+      const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId, undefined, user), this.search.provider.items()]);
       const band = affordableRange(priced(inventory, items.data), maxGainPct);
       return band ? { min: band.minReceiveValue, max: band.maxReceiveValue } : null;
     } catch { return null; }
@@ -529,11 +529,12 @@ export class Bot {
     this.cooldown(user.discordId);
     const partner = await this.search.provider.user(partnerInput);
     if (partner.id === user.robloxId) throw new UserError('Choose a different trade partner.');
-    const [own, theirs, items] = await Promise.all([this.search.provider.inventory(user.robloxId), this.search.provider.inventory(partner.id), this.search.provider.items()]);
+    const [own, theirs, items] = await Promise.all([this.search.provider.inventory(user.robloxId, undefined, user), this.search.provider.inventory(partner.id, undefined, user), this.search.provider.items()]);
+    if (own.tradabilityError || theirs.tradabilityError) throw new UserError(own.tradabilityError ?? theirs.tradabilityError!);
     if ([own.fetchedAt, theirs.fetchedAt, items.fetchedAt].some(at => Date.now() - at > 300_000))
       throw new UserError('An inventory or price snapshot became stale during analysis. Please retry.');
     const give = selectCopies(giveIds, priced(own, items.data)), receive = selectCopies(receiveIds, priced(theirs, items.data));
-    if (!give || !receive) throw new UserError('One side lacks enough available copies, or an item is held or has no supported price.');
+    if (!give || !receive) throw new UserError('One side lacks enough verified tradable copies, or an item is held or has no supported price.');
     return analysisMessage(evaluate(give, receive, user.preferences), partner, await this.avatar(partner.id));
   }
 }

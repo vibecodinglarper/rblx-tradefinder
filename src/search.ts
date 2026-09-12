@@ -44,14 +44,15 @@ export class SearchService {
     finally { this.active.delete(user.discordId); }
   }
   private async run(user: UserProfile, p: Preferences, options: SearchOptions): Promise<SearchResult> {
-    const [items, adSnapshot, inventory] = await Promise.all([this.provider.items(), this.provider.ads(), this.provider.inventory(user.robloxId)]);
+    const [items, adSnapshot, inventory] = await Promise.all([this.provider.items(), this.provider.ads(), this.provider.inventory(user.robloxId, undefined, user)]);
+    if (inventory.tradabilityError) throw new UserError(inventory.tradabilityError);
     let own = priced(inventory, items.data);
     if (options.giveOnly !== undefined) {
       const copy = own.find(c => c.assetId === options.giveOnly);
       if (!copy) throw new UserError('You do not have an available, non-projected copy of that item to give.');
       own = [copy];
     }
-    if (!own.length) throw new UserError('No available, non-projected items with supported Rolimons prices were found in this public inventory.');
+    if (!own.length) throw new UserError('No verified tradable, non-projected items with supported Rolimons prices were found in this public inventory.');
     // "Affordable" without a typed range means the band this inventory can pay for; alerts get the same treatment.
     if (p.affordable && p.minReceiveValue === null && p.maxReceiveValue === null) p = { ...p, ...affordableRange(own, REALISTIC_GAIN_PCT) };
     const inBand = (ad: TradeAd) => {
@@ -94,7 +95,7 @@ export class SearchService {
     const bySeller = new Map<number, { ads: TradeAd[]; score: number }>();
     // Price-screen every recent ad before spending requests on seller inventories.
     for (const ad of ads) {
-      const advertised = ad.offering.map((assetId, i) => ({ assetId, userAssetId: -(i + 1), onHold: false, item: items.data.get(assetId)! }));
+      const advertised = ad.offering.map((assetId, i) => ({ assetId, userAssetId: -(i + 1), onHold: false, tradable: true, item: items.data.get(assetId)! }));
       const previews = propose(ad, own, advertised, bundles, p);
       if (!previews.length) continue;
       const existing = bySeller.get(ad.userId) ?? { ads: [], score: -Infinity };
@@ -109,7 +110,11 @@ export class SearchService {
     // requests to Roblox one at a time; asking concurrently only overlaps the waiting, which is most of the cost.
     type Verified = { candidate: { ads: TradeAd[] }; inventory: Inventory; error?: undefined } | { error: UserError; candidate?: undefined; inventory?: undefined };
     const verified = await Promise.all(sellers.map(async ([sellerId, candidate]): Promise<Verified> => {
-      try { return { candidate, inventory: await this.provider.inventory(sellerId, PARTNER_INVENTORY_MS) }; }
+      try {
+        const inventory = await this.provider.inventory(sellerId, PARTNER_INVENTORY_MS, user);
+        if (inventory.tradabilityError) throw new UserError(inventory.tradabilityError);
+        return { candidate, inventory };
+      }
       catch (error) {
         if (!(error instanceof UserError)) throw error;
         return { error };

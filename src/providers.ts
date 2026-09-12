@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { Cache, HttpClient } from './http.js';
-import { idSchema, UserError, type Inventory, type Item, type Snapshot, type TradeAd } from './domain.js';
+import { idSchema, UserError, type Inventory, type Item, type Snapshot, type TradeAd, type UserProfile } from './domain.js';
+import type { TradableInventoryReader } from './trading.js';
+import { reconcileInventory } from './tradability.js';
 
 const numeric = z.number().finite();
 const itemRow = z.tuple([z.string(), z.string(), numeric, numeric, numeric, numeric, numeric, numeric, numeric, numeric]);
@@ -67,10 +69,29 @@ export function extractSiteAds(html: string): unknown {
   throw new UserError('Rolimons trades page ad data was truncated.');
 }
 
+/** Explicit Rolimons pricing-ID → Roblox target mappings, not guesses based on matching item names. */
+export function parseBundleAssets(html: string): Map<number, number> {
+  const match = /var\s+item_details\s*=\s*(\{[^\n]*\})\s*;/.exec(html);
+  if (!match) throw new UserError('Rolimons bundle mappings are unavailable.');
+  let rows: unknown;
+  try { rows = JSON.parse(match[1]!); } catch { throw new UserError('Rolimons bundle mappings are unreadable.'); }
+  const parsed = z.record(z.string(), z.array(z.unknown())).safeParse(rows);
+  if (!parsed.success) throw new UserError('Rolimons bundle mappings changed format.');
+  const result = new Map<number, number>();
+  for (const [id, row] of Object.entries(parsed.data)) {
+    if (row.length !== 11 || row[9] !== 2) continue;
+    const asset = idSchema.safeParse(Number(id)), bundle = idSchema.safeParse(row[10]);
+    if (!asset.success || !bundle.success) continue;
+    if (result.has(bundle.data) && result.get(bundle.data) !== asset.data) throw new UserError('Rolimons returned conflicting bundle mappings.');
+    result.set(bundle.data, asset.data);
+  }
+  return result;
+}
+
 export interface DataProvider {
   items(): Promise<Snapshot<Map<number, Item>>>;
   ads(): Promise<Snapshot<TradeAd[]>>;
-  inventory(userId: number, maxAgeMs?: number): Promise<Inventory>;
+  inventory(userId: number, maxAgeMs?: number, viewer?: UserProfile): Promise<Inventory>;
   user(input: string): Promise<{ id: number; name: string }>;
   /** Avatar headshot CDN URL, or null when unavailable. Optional: fixtures and offline tools may omit it. */
   avatar?(userId: number): Promise<string | null>;
@@ -83,7 +104,7 @@ export class Providers implements DataProvider {
   private cache = new Cache();
   /** After the trades page refuses us (403/429), stop asking for a while; the API and archive carry on unaffected. */
   private siteBlockedUntil = 0;
-  constructor(private http = new HttpClient()) {}
+  constructor(private http = new HttpClient(), private readTradable?: TradableInventoryReader) {}
   items(): Promise<Snapshot<Map<number, Item>>> {
     return this.cache.get('items', 120_000, async () => ({
       data: parseItems(await this.http.json('https://api.rolimons.com/items/v1/itemdetails')), fetchedAt: Date.now(),
@@ -103,7 +124,7 @@ export class Providers implements DataProvider {
   siteAds(): Promise<TradeAd[]> {
     if (this.siteBlockedUntil > Date.now()) return Promise.resolve([]);
     return this.cache.get('siteAds', 150_000, async () => {
-      try { return parseAds(extractSiteAds(await this.http.text('https://www.rolimons.com/trades'))); }
+      try { return parseAds(extractSiteAds(await this.tradesHtml())); }
       catch (error) {
         if (error instanceof UserError && /HTTP 403|rate limited|busy/.test(error.message)) this.siteBlockedUntil = Date.now() + 30 * 60_000;
         throw error;
@@ -111,11 +132,27 @@ export class Providers implements DataProvider {
     });
   }
   /**
-   * `maxAgeMs` is how stale a cached copy may be. The user's own inventory is read fresh so a trade is never proposed
-   * on a copy they have just traded away; a prospective partner's may be held a little longer, since every
-   * recommendation is re-checked against both inventories before it is acted on anyway.
+   * Public rows remain visible. A complete authenticated check marks their availability and adds actual bundle
+   * holdings. Own inventories may be cached for a minute; every send checks availability again without the cache.
    */
-  inventory(userId: number, maxAgeMs = 60_000): Promise<Inventory> {
+  async inventory(userId: number, maxAgeMs = 60_000, viewer?: UserProfile): Promise<Inventory> {
+    const publicInventory = await this.publicInventory(userId, maxAgeMs);
+    if (!viewer || !this.readTradable) return { ...publicInventory, tradabilityError: 'Use /connect to verify which items you can trade.' };
+    try {
+      const verified = await this.readTradable(userId, viewer, maxAgeMs);
+      // Without an explicit mapping, bundle ownership can still be displayed but never priced as an unrelated asset.
+      const bundles = verified.data.some(c => c.itemTarget.itemType === 'Bundle')
+        ? await this.cache.get('bundleAssets', 3_600_000, async () => parseBundleAssets(await this.tradesHtml())).catch(() => new Map<number, number>())
+        : new Map<number, number>();
+      return reconcileInventory(publicInventory, verified, bundles);
+    } catch (error) {
+      return { ...publicInventory, tradabilityError: error instanceof UserError ? error.message : 'Tradability could not be verified. Try again shortly.' };
+    }
+  }
+  private tradesHtml(): Promise<string> {
+    return this.cache.get('tradesHtml', 150_000, () => this.http.text('https://www.rolimons.com/trades'));
+  }
+  private publicInventory(userId: number, maxAgeMs: number): Promise<Inventory> {
     idSchema.parse(userId);
     return this.cache.get(`inventory:${userId}`, maxAgeMs, async () => {
       const holdings: Inventory['holdings'] = [];

@@ -23,8 +23,8 @@ test('amounts accept numbers, item names and multiplied items; ranges accept the
 });
 test('the engine applies the general profit window unless a received item carries its own rule', () => {
   // A downgrade: one item worth 110 for two worth 60 each, a gain of 10.
-  const give = [{ assetId: 30, userAssetId: 3, onHold: false, item: item(30, 110) }];
-  const receive = [{ assetId: 10, userAssetId: 1, onHold: false, item: item(10, 60) }, { assetId: 20, userAssetId: 2, onHold: false, item: item(20, 60) }];
+  const give = [{ assetId: 30, userAssetId: 3, onHold: false, tradable: true, item: item(30, 110) }];
+  const receive = [{ assetId: 10, userAssetId: 1, onHold: false, tradable: true, item: item(10, 60) }, { assetId: 20, userAssetId: 2, onHold: false, tradable: true, item: item(20, 60) }];
   const general = { ...defaults(), minValueGain: 20, maxValueGain: 100 };
   assert.match(evaluate(give, receive, general).failures.join(' '), /Value gain is below 20\./);
   assert.match(evaluate(give, receive, { ...general, minValueGain: null, maxValueGain: 5 }).failures.join(' '), /Value gain is above 5\./);

@@ -48,6 +48,15 @@ test('cache coalesces concurrent loads and never caches failed requests', async 
   await assert.rejects(cache.get('b', 1000, async () => { throw new Error('down'); }));
   assert.equal(await cache.get('b', 1000, loader), 42); assert.equal(loads, 2);
 });
+test('a stricter inventory freshness request does not reuse an older cache entry', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const cache = new Cache(); let loads = 0;
+  const loader = async () => ++loads;
+  assert.equal(await cache.get('inventory', 180_000, loader), 1);
+  t.mock.timers.tick(61_000);
+  assert.equal(await cache.get('inventory', 60_000, loader), 2);
+  assert.equal(await cache.get('inventory', 0, loader), 3);
+});
 test('resolves item IDs and acronyms while reporting ambiguous searches', () => {
   const items = fixtureProvider().itemMap;
   assert.equal(resolveItem('I10', items).id, 10); assert.equal(resolveItem('30', items).id, 30);

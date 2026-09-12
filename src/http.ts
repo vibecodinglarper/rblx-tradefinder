@@ -82,16 +82,17 @@ export class HttpClient {
 
 /** Bounded cache with in-flight request sharing; errors and stale data are never cached. */
 export class Cache {
-  private values = new Map<string, { expires: number; data: unknown }>();
+  private values = new Map<string, { loadedAt: number; data: unknown }>();
   private pending = new Map<string, Promise<unknown>>();
   async get<T>(key: string, ttl: number, loader: () => Promise<T>): Promise<T> {
     const cached = this.values.get(key);
-    if (cached && cached.expires > Date.now()) return cached.data as T;
+    if (cached && Date.now() - cached.loadedAt < ttl) return cached.data as T;
     const running = this.pending.get(key);
     if (running) return running as Promise<T>;
+    const loadedAt = Date.now();
     const promise = loader().then(data => {
       this.values.delete(key);
-      this.values.set(key, { expires: Date.now() + ttl, data });
+      this.values.set(key, { loadedAt, data });
       if (this.values.size > 500) this.values.delete(this.values.keys().next().value!);
       return data;
     }).finally(() => this.pending.delete(key));

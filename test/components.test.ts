@@ -163,11 +163,11 @@ test('inventory groups copies into quantities, pages through grid and text views
   for (let id = 100; id < 115; id++) provider.itemMap.set(id, { ...provider.itemMap.get(40)!, id, name: `Extra ${id}`, acronym: `E${id}` });
   provider.itemMap.set(10, { ...provider.itemMap.get(10)!, name: 'Anime Hair', rare: true });
   provider.inventories.set(1, { userId: 1, fetchedAt: Date.now(), holdings: [
-    ...Array.from({ length: 16 }, (_, i) => ({ assetId: 10, userAssetId: 1000 + i, onHold: i === 0 })),
-    ...Array.from({ length: 15 }, (_, i) => ({ assetId: 100 + i, userAssetId: 2000 + i, onHold: false })),
-    { assetId: 20, userAssetId: 3000, onHold: false }, { assetId: 999999, userAssetId: 3001, onHold: false },
+    ...Array.from({ length: 16 }, (_, i) => ({ assetId: 10, userAssetId: 1000 + i, onHold: i === 0, tradable: i !== 0 })),
+    ...Array.from({ length: 15 }, (_, i) => ({ assetId: 100 + i, userAssetId: 2000 + i, onHold: false, tradable: true })),
+    { assetId: 20, userAssetId: 3000, onHold: false, tradable: true }, { assetId: 999999, userAssetId: 3001, onHold: false, tradable: true },
     // Not tracked by Rolimons: Roblox's own name and recent average price stand in, and it sorts by that RAP.
-    { assetId: 888888, userAssetId: 3002, onHold: false, name: 'Roblox Only Hat', robloxRap: 48 },
+    { assetId: 888888, userAssetId: 3002, onHold: false, tradable: true, name: 'Roblox Only Hat', robloxRap: 48 },
   ] });
   const store = new Store(':memory:'); const user = profile(); store.save(user);
   const bot = new Bot(store, new SearchService(provider));
@@ -183,9 +183,9 @@ test('inventory groups copies into quantities, pages through grid and text views
   const t = text.last()?.body as { embeds: { toJSON(): { description?: string } }[]; files: { name: string }[] };
   assert.deepEqual(t.files, []);
   const desc = t.embeds[0]!.toJSON().description!;
-  assert.match(desc, /\*\*3\.\*\* \[Roblox Only Hat\]\(.*\) · V 48 · RAP 48\n\*\*4\.\*\* \[Extra 100\]/); assert.doesNotMatch(desc, /RAP\)|value = RAP/);
-  assert.match(t.embeds[0]!.toJSON().description!, /\*\*1\.\*\* \[Anime Hair\]\(.*\) \*\*16x\*\* · V 50 · RAP 50 · 💎 rare ⏳ 1 on hold/);
-  assert.doesNotMatch(t.embeds[0]!.toJSON().description!, /locked/); assert.match(t.embeds[0]!.toJSON().description!, /Item 999999\]\(.*\) · no price · ❔ unpriced/);
+  assert.match(desc, /\*\*3\.\*\* \[Roblox Only Hat\]\(.*\) · V 48 · RAP 48 · ✅ Tradable\n\*\*4\.\*\* \[Extra 100\]/); assert.doesNotMatch(desc, /RAP\)|value = RAP/);
+  assert.match(t.embeds[0]!.toJSON().description!, /\*\*1\.\*\* \[Anime Hair\]\(.*\) \*\*16x\*\* · V 50 · RAP 50 · ✅ 15\/16 tradable 💎 rare ⏳ 1 on hold/);
+  assert.doesNotMatch(t.embeds[0]!.toJSON().description!, /locked/); assert.match(t.embeds[0]!.toJSON().description!, /Item 999999\]\(.*\) · no price · ✅ Tradable ❔ unpriced/);
   assert.match(json(t), /tf:inv:grid:0/);
   store.close();
 });
@@ -269,7 +269,7 @@ test('search results state how many ads were screened and how many offered the t
 test('several targets can be searched at once from the menu or a comma-separated form', async () => {
   const provider = finderProvider();
   provider.adList.push({ ...provider.adList[0]!, id: 701, userId: 3, username: 'Other', offering: [40], requesting: [] });
-  provider.inventories.set(3, { userId: 3, fetchedAt: Date.now(), holdings: [{ assetId: 40, userAssetId: 3100, onHold: false }] });
+  provider.inventories.set(3, { userId: 3, fetchedAt: Date.now(), holdings: [{ assetId: 40, userAssetId: 3100, onHold: false, tradable: true }] });
   const store = new Store(':memory:'); const user = profile(); user.preferences.targetIds = [30]; store.save(user);
   const bot = new Bot(store, new SearchService(provider));
   const menu = component(ids.build('fq', 'target', 'upgrade', 3), 'select', { values: ['-', ids.encode(30), ids.encode(40)] }); await bot.component(menu.i);
@@ -334,7 +334,7 @@ test('the upgrade list pages five sellers at a time, orders slight losses before
     const id = 300 + n; const value = [102, 100, 96, 103, 101, 99, 97][n]!;
     provider.itemMap.set(id, { ...provider.itemMap.get(30)!, id, name: `Offer ${n}`, acronym: `O${n}`, value, rap: value });
     provider.adList.push({ ...provider.adList[0]!, id: 800 + n, userId: 10 + n, username: `Seller${n}`, offering: [id], requesting: [10, 20] });
-    provider.inventories.set(10 + n, { userId: 10 + n, fetchedAt: Date.now(), holdings: [{ assetId: id, userAssetId: 5000 + n, onHold: false }] });
+    provider.inventories.set(10 + n, { userId: 10 + n, fetchedAt: Date.now(), holdings: [{ assetId: id, userAssetId: 5000 + n, onHold: false, tradable: true }] });
   }
   const store = new Store(':memory:'); const answered = profile(); answered.preferences.affordable = true; store.save(answered); const bot = new Bot(store, new SearchService(provider, 30));
   const search = component(ids.build('find', 'upgrade', ids.encodeList([300, 301, 302, 303, 304]), 3)); await bot.component(search.i);
@@ -356,13 +356,13 @@ test('the upgrade list pages five sellers at a time, orders slight losses before
 test('downgrade mode gives one chosen item for a seller bundle worth about +10%, ranked closest to +10% first, and never touches projected items', async () => {
   const provider = fixtureProvider();
   // The user gives item 30 (value 110, they own one). Sellers offer pairs: 60+61 = 121 (+10%), 62+63 = 130 (+18%), 64+65 = 112 (+1.8%, below +5%), 66 projected + 67.
-  provider.inventories.set(1, { userId: 1, fetchedAt: Date.now(), holdings: [{ assetId: 30, userAssetId: 100, onHold: false }, { assetId: 10, userAssetId: 101, onHold: false }] });
+  provider.inventories.set(1, { userId: 1, fetchedAt: Date.now(), holdings: [{ assetId: 30, userAssetId: 100, onHold: false, tradable: true }, { assetId: 10, userAssetId: 101, onHold: false, tradable: true }] });
   const pairs: [number, number, number, number, boolean][] = [[60, 61, 60, 61, false], [62, 63, 65, 65, false], [64, 65, 56, 56, false], [66, 67, 60, 61, true]];
   pairs.forEach(([a, b, va, vb, projected], n) => {
     provider.itemMap.set(a, { ...provider.itemMap.get(40)!, id: a, name: `Part ${a}`, acronym: `P${a}`, value: va, rap: va, projected });
     provider.itemMap.set(b, { ...provider.itemMap.get(40)!, id: b, name: `Part ${b}`, acronym: `P${b}`, value: vb, rap: vb });
     provider.adList.push({ ...provider.adList[0]!, id: 900 + n, userId: 20 + n, username: `Bundler${n}`, offering: [a, b], requesting: [] });
-    provider.inventories.set(20 + n, { userId: 20 + n, fetchedAt: Date.now(), holdings: [{ assetId: a, userAssetId: 6000 + n * 2, onHold: false }, { assetId: b, userAssetId: 6001 + n * 2, onHold: false }] });
+    provider.inventories.set(20 + n, { userId: 20 + n, fetchedAt: Date.now(), holdings: [{ assetId: a, userAssetId: 6000 + n * 2, onHold: false, tradable: true }, { assetId: b, userAssetId: 6001 + n * 2, onHold: false, tradable: true }] });
   });
   const store = new Store(':memory:'); store.save(profile()); const bot = new Bot(store, new SearchService(provider, 30));
   const panel = component(ids.build('fq', 'mode', 'downgrade', '-', 3)); await bot.component(panel.i);

@@ -574,9 +574,9 @@ export function linkMessage(roblox: { id: number; name: string }, copies: number
     .addFields({ name: 'Roblox ID', value: `\`${roblox.id}\``, inline: true }, { name: 'Public copies', value: `${copies}`, inline: true })
   return message(embed, row(nav.find(), nav.inventory(), link('Rolimons', links.player(roblox.id), '📈')));
 }
-export interface InventoryPage { view: InventoryView; page: number; pages: number; entries: InventoryEntry[]; total: number; copies: number; value: number; rap: number }
-const TAG_EMOJI: Record<string, string> = { rare: '💎', projected: '📈', hyped: '🔥', unpriced: '❔', 'on hold': '⏳' };
-const tagLabel = (tag: string) => `${TAG_EMOJI[tag] ?? TAG_EMOJI['on hold']} ${tag}`;
+export interface InventoryPage { view: InventoryView; page: number; pages: number; entries: InventoryEntry[]; total: number; copies: number; value: number; rap: number; note?: string }
+const TAG_EMOJI: Record<string, string> = { Tradable: '✅', 'Not tradable': '🚫', 'Tradability unknown': '❔', rare: '💎', projected: '📈', hyped: '🔥', unpriced: '❔', 'on hold': '⏳' };
+const tagLabel = (tag: string) => `${TAG_EMOJI[tag] ?? (/^\d+\/\d+ tradable$/.test(tag) ? '✅' : TAG_EMOJI['on hold'])} ${tag}`;
 /** Paged inventory: a rendered grid of item squares (attached as inventory.png) or a plain text list, with a toggle between them. */
 export function inventoryMessage(user: UserProfile, inv: InventoryPage, avatar?: Avatar) {
   const grid = inv.view === 'grid';
@@ -585,10 +585,11 @@ export function inventoryMessage(user: UserProfile, inv: InventoryPage, avatar?:
     .setAuthor(author(`${user.username}'s inventory`, null, avatar))
     .setTitle(`🎒 ${inv.total} item${inv.total === 1 ? '' : 's'} · ${inv.copies} cop${inv.copies === 1 ? 'y' : 'ies'}`)
     .addFields(
-      { name: `${statIcons.value === 'V' ? '💰' : statIcons.value} Value`, value: number(inv.value), inline: true },
-      { name: `${statIcons.rap === 'RAP' ? '📊' : statIcons.rap} RAP`, value: number(inv.rap), inline: true },
+      { name: `${statIcons.value === 'V' ? '💰' : statIcons.value} Tradable value`, value: number(inv.value), inline: true },
+      { name: `${statIcons.rap === 'RAP' ? '📊' : statIcons.rap} Tradable RAP`, value: number(inv.rap), inline: true },
     )
     .setTimestamp();
+  if (inv.note) embed.setFooter({ text: inv.note });
   if (grid) { embed.setImage('attachment://inventory.png'); if (!inv.total) embed.setDescription('*No collectible items were found in this public inventory.*'); }
   else embed.setDescription(inv.entries.map((e, i) => {
     const name = `[${escapeMarkdown(clip(e.name, 40))}](${links.item(e.assetId)})${e.quantity > 1 ? ` **${e.quantity}x**` : ''}`;
@@ -610,9 +611,9 @@ export function deletedMessage() {
 // ---------- Help ----------
 export function helpMessage() {
   const embed = new EmbedBuilder().setColor(Colors.brand).setTitle('👋 Tradefinder')
-    .setDescription('Finds Roblox limited-item trades from recent Rolimons trade ads and checks both inventories. Use /connect to enable Place Trade, then click it to send the displayed offer.')
+    .setDescription('Finds Roblox limited-item trades from recent Rolimons trade ads and checks both inventories. Use /connect to verify tradable items and enable recommendations. Click Place Trade to send a reviewed offer.')
     .addFields(
-      { name: '1️⃣ Link', value: '🔗 `/connect` connects your Roblox session for sending. `/trade link` tracks a public inventory without sending access. `/disconnect` removes the saved session.', inline: false },
+      { name: '1️⃣ Link', value: '🔗 `/connect` connects your Roblox session for inventory verification and sending. `/trade link` tracks a public inventory without sending access. `/disconnect` removes the saved session.', inline: false },
       { name: '2️⃣ Set up', value: '⚙️ `/trade settings` — your account, filters and lists · 💰 `/trade profit` — how much profit or loss you will take.', inline: false },
       { name: '3️⃣ Search', value: '🔎 `/find trades` or `/trade find` — pick a mode and target, then press Find trades. Review an offer and click its numbered Place Trade button to send it.', inline: false },
       { name: '4️⃣ Wanted items', value: '⭐ `/trade watch` saves the items you want to receive and per-item profit rules.', inline: false },
@@ -641,7 +642,7 @@ export function connectedMessage(account: { id: number; name: string }) {
 }
 export function disconnectedMessage() {
   return message(new EmbedBuilder().setColor(Colors.success).setTitle('Roblox session removed')
-    .setDescription('Bot trade sending is disabled. Your public inventory settings remain. Trades already sent remain outbound on Roblox.'));
+    .setDescription('Recommendations and trade sending are disabled until you reconnect. Your public inventory settings remain. Trades already sent remain outbound on Roblox.'));
 }
 export function tradeSentMessage(tradeId: number) {
   return message(new EmbedBuilder().setColor(Colors.success).setTitle('Outbound trade sent')

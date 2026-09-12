@@ -96,8 +96,17 @@ export interface Item {
   demand: number; trend: number; projected: boolean; hyped: boolean; rare: boolean;
 }
 /** Roblox reports a name and recent average price per copy; they are the fallback when Rolimons does not track the item. */
-export interface Holding { assetId: number; userAssetId: number; onHold: boolean; name?: string; robloxRap?: number | null }
-export interface Inventory { userId: number; holdings: Holding[]; fetchedAt: number }
+export interface ItemTarget { itemType: 'Asset' | 'Bundle'; targetId: string }
+export interface Holding {
+  /** Rolimons pricing ID; migrated bundles retain the original face ID when mapped. */
+  assetId: number; userAssetId: number | string; onHold: boolean; name?: string; robloxRap?: number | null;
+  /** Only an authenticated, complete inventory check can establish this. Undefined means unchecked. */
+  tradable?: boolean;
+  itemTarget?: ItemTarget;
+  collectibleItemInstanceId?: string;
+  unmappedBundle?: boolean;
+}
+export interface Inventory { userId: number; holdings: Holding[]; fetchedAt: number; tradabilityError?: string }
 export interface TradeAd {
   id: number; createdAt: number; userId: number; username: string;
   offering: number[]; requesting: number[]; tags: number[]; offeringRobux: number; requestingRobux: number;

@@ -27,9 +27,9 @@ export async function iconPng(name: string): Promise<Buffer> {
   return canvas.toBuffer('image/png');
 }
 
-const COLS = 4, CARD = 210, GAP = 14, THUMB = 150, CARD_H = 268;
+const COLS = 4, CARD = 210, GAP = 14, THUMB = 150, CARD_H = 292;
 const FONT = 'sans-serif';
-const TAG_COLORS: Record<string, string> = { rare: '#5865f2', projected: '#ed4245', hyped: '#f47b67', unpriced: '#4e5058', 'on hold': '#fee75c', 'value = rap': '#3ba55d' };
+const TAG_COLORS: Record<string, string> = { Tradable: '#238636', 'Not tradable': '#b42332', 'Tradability unknown': '#4e5058', rare: '#5865f2', projected: '#ed4245', hyped: '#f47b67', unpriced: '#4e5058', 'on hold': '#fee75c', 'value = rap': '#3ba55d' };
 const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
 
 function rounded(ctx: SKRSContext2D, x: number, y: number, w: number, h: number, r: number): void {
@@ -82,12 +82,13 @@ export async function renderInventoryGrid(entries: InventoryEntry[], thumbnails:
       stat(robux, 'RAP', fmt(e.rap ?? 0));
     }
     // Tag chips.
-    let cx = x + 12; const cy = ty + THUMB + 56;
+    let cx = x + 12, cy = ty + THUMB + 56;
     ctx.font = `bold 11px ${FONT}`;
     for (const tag of e.tags) {
       const text = tag.toUpperCase(); const w = ctx.measureText(text).width + 12;
-      if (cx + w > x + CARD - 8) break;
-      const color = TAG_COLORS[tag] ?? TAG_COLORS['on hold']!;
+      if (cx + w > x + CARD - 8) { cx = x + 12; cy += 23; }
+      if (cy + 18 > y + CARD_H - 8) break;
+      const color = TAG_COLORS[tag] ?? (/^\d+\/\d+ tradable$/.test(tag) ? TAG_COLORS.Tradable! : TAG_COLORS['on hold']!);
       ctx.fillStyle = color; rounded(ctx, cx, cy, w, 18, 6); ctx.fill();
       ctx.fillStyle = color === '#fee75c' ? '#1e1f22' : '#ffffff'; ctx.fillText(text, cx + 6, cy + 13);
       cx += w + 6;

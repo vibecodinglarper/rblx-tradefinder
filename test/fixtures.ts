@@ -6,7 +6,7 @@ export const item = (id: number, value: number, overrides: Partial<Item> = {}): 
   projected: false, hyped: false, rare: false, ...overrides,
 });
 export const inventory = (userId: number, ids: number[], start = userId * 100): Inventory => ({
-  userId, holdings: ids.map((assetId, i) => ({ assetId, userAssetId: start + i, onHold: false })), fetchedAt: Date.now(),
+  userId, holdings: ids.map((assetId, i) => ({ assetId, userAssetId: start + i, onHold: false, tradable: true })), fetchedAt: Date.now(),
 });
 export const ad = (overrides: Partial<TradeAd> = {}): TradeAd => ({ id: 700, userId: 2, username: 'ExampleSeller', createdAt: Date.now(),
   offering: [30], requesting: [10, 20], tags: [], offeringRobux: 0, requestingRobux: 0, ...overrides });

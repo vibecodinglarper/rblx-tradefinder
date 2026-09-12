@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -104,12 +105,85 @@ test('send uses distinct fresh v2 IDs, zero Robux, and retries exactly one CSRF 
 
 test('inventory pagination preserves duplicate quantities, skips held copies and never uses asset IDs', async () => {
   const { fetcher, state, throttle } = api();
-  state.inventory = (owner, url) => json({ userId: owner, items: [{ ...item(10, url.searchParams.has('cursor') ? ['free-2'] : ['free-1']), instances: [instance(10, 'held', true), instance(10, url.searchParams.has('cursor') ? 'free-2' : 'free-1')] }], nextPageCursor: url.searchParams.has('cursor') ? '' : 'next' });
+  state.inventory = (owner, url) => json({ userId: owner, items: [{ ...item(10, url.searchParams.has('cursor') ? ['free-2'] : ['free-1']), instances: [instance(10, url.searchParams.has('cursor') ? 'held-2' : 'held-1', true), instance(10, url.searchParams.has('cursor') ? 'free-2' : 'free-1')] }], nextPageCursor: url.searchParams.has('cursor') ? '' : 'next' });
   const client = new RobloxTradesClient(secret, fetcher, Date.now() + 120_000, throttle);
   assert.deepEqual(await client.instances(1, [10, 10]), ['free-1', 'free-2']);
   await assert.rejects(client.instances(1, [10, 10, 10]), /unavailable or on hold/);
   state.inventory = owner => json({ userId: owner, items: [], nextPageCursor: 'repeated' });
   await assert.rejects(client.instances(1, [10]), /repeated/);
+});
+
+test('authenticated inventory reads every page, includes bundles and holds, and rejects incomplete verification', async () => {
+  const { fetcher, state, throttle } = api();
+  const target = { itemType: 'Bundle', targetId: '163046677043335' };
+  state.inventory = (owner, url) => json({ userId: owner, items: url.searchParams.has('cursor')
+    ? [{ itemTarget: target, itemName: 'Rose Amazeface', recentAveragePrice: 4120,
+      instances: [{ collectibleItemInstanceId: 'bundle-copy', itemTarget: target, isOnHold: true }] }]
+    : [item(10, ['asset-copy'])], nextPageCursor: url.searchParams.has('cursor') ? null : 'next' });
+  const client = new RobloxTradesClient(secret, fetcher, Date.now() + 120_000, throttle);
+  const result = await client.tradableInventory(1);
+  assert.equal(result.data.length, 2);
+  assert.deepEqual(result.data[1], { itemTarget: target, collectibleItemInstanceId: 'bundle-copy', isOnHold: true, name: 'Rose Amazeface', rap: 4120 });
+  state.inventory = (owner, url) => url.searchParams.has('cursor') ? json({ errors: [] }, 403)
+    : json({ userId: owner, items: [item(10, ['one'])], nextPageCursor: 'next' });
+  await assert.rejects(client.tradableInventory(1), /denied/);
+  state.inventory = owner => json({ userId: owner, items: [item(10, ['same', 'same'])], nextPageCursor: null });
+  await assert.rejects(client.tradableInventory(1), /changed during pagination/);
+  state.inventory = owner => json({ userId: owner + 1, items: [], nextPageCursor: null });
+  await assert.rejects(client.tradableInventory(1), /invalid tradable inventory/);
+});
+
+test('Place Trade matches bundles by type and ID, and blocks missing, held or unverified copies before sending', async () => {
+  const { store, service, recommendation, state } = await setup();
+  const target = { itemType: 'Bundle' as const, targetId: '163046677043335' };
+  recommendation.give[0]!.itemTarget = target;
+  try {
+    // The legacy asset cannot satisfy a requested bundle, even if its numeric ID happens to match.
+    state.inventory = owner => json({ userId: owner, items: owner === 1 ? [item(Number(target.targetId), ['classic']), item(20, ['hat'])] : [item(30, ['recipient'])], nextPageCursor: null });
+    await assert.rejects(service.place(store.get('123')!, recommendation), /unavailable/);
+    assert.equal(state.posts, 0);
+    const response = (owner: number, held: boolean) => json({ userId: owner, items: owner === 1
+      ? [{ itemTarget: target, instances: [{ collectibleItemInstanceId: 'bundle-copy', itemTarget: target, isOnHold: held }] }, item(20, ['hat'])]
+      : [item(30, ['recipient'])], nextPageCursor: null });
+    state.inventory = owner => response(owner, true);
+    await assert.rejects(service.place(store.get('123')!, recommendation), /unavailable/);
+    assert.equal(state.posts, 0);
+    state.inventory = owner => response(owner, false);
+    recommendation.give[0]!.tradable = false;
+    await assert.rejects(service.place(store.get('123')!, recommendation), /non-tradable/);
+    assert.equal(state.posts, 0);
+    recommendation.give[0]!.tradable = true;
+    state.send = body => {
+      assert.deepEqual(body.senderOffer.collectibleItemInstanceIds, ['bundle-copy', 'hat']);
+      return json({ tradeId: 777 });
+    };
+    assert.equal(await service.place(store.get('123')!, recommendation), 777);
+    assert.equal(state.posts, 1);
+  } finally { store.close(); }
+});
+
+test('inventory cache requires the viewer session even after a successful read', async () => {
+  const { store, service, calls } = await setup();
+  try {
+    const user = store.get('123')!;
+    assert.equal((await service.inventory(1, user)).data.length, 2);
+    const before = calls.length;
+    await service.inventory(1, user);
+    assert.equal(calls.length, before);
+    store.disconnect('123');
+    await assert.rejects(service.inventory(1, user), /connect/);
+    assert.equal(calls.length, before);
+  } finally { store.close(); }
+});
+
+test('legacy asset-only send receipts still prevent duplicate trades after adding bundle support', async () => {
+  const { store, service, recommendation, state } = await setup();
+  try {
+    const signature = createHash('sha256').update(JSON.stringify([1, 2, [10, 20], [30]])).digest('hex');
+    store.claimTrade(signature); store.finishTrade(signature, 808);
+    await assert.rejects(service.place(store.get('123')!, recommendation), /already sent/);
+    assert.equal(state.posts, 0);
+  } finally { store.close(); }
 });
 
 test('expired verification stops before any network request, and repeated CSRF failures stop after one retry', async () => {

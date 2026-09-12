@@ -4,7 +4,7 @@ import { defaults, effectiveValue, type Item, type Preferences } from '../src/do
 import { emptyBundles, evaluate, outgoingBundles, priced, propose, selectCopies, totals, affordableRange } from '../src/engine.js';
 import { ad, fixtureProvider, inventory, item, proposalProvider } from './fixtures.js';
 
-const copy = (id: number, value: number, copyId = id) => ({ assetId: id, userAssetId: copyId, onHold: false, item: item(id, value) });
+const copy = (id: number, value: number, copyId = id) => ({ assetId: id, userAssetId: copyId, onHold: false, tradable: true, item: item(id, value) });
 test('upgrade calculates gains, overpay and counterparty loss with their correct denominators', () => {
   // A real upgrade: two copies consolidated into one better item, carrying the overpay that gets it accepted.
   const r = evaluate([copy(1, 50), copy(2, 50)], [copy(3, 90)], { ...defaults(), mode: 'upgrade' });
