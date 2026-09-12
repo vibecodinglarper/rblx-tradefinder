@@ -1,4 +1,4 @@
-import { effectiveValue, type Holding, type Item } from './domain.js';
+import { effectiveValue, visibleHoldings, type Holding, type Item } from './domain.js';
 import { totals, type PricedCopy, type Totals } from './engine.js';
 
 /**
@@ -20,7 +20,7 @@ export interface InventoryChange {
 }
 /** Rolimons data when the item is tracked; otherwise Roblox's own name and recent average price stand in for both figures. */
 function copyOf(h: Holding, items: Map<number, Item>): PricedCopy {
-  const item = items.get(h.assetId) ?? {
+  const item = (h.unmappedBundle ? undefined : items.get(h.assetId)) ?? {
     id: h.assetId, name: h.name ?? `Item ${h.assetId}`, acronym: '', rap: h.robloxRap && h.robloxRap > 0 ? h.robloxRap : 0, value: null,
     demand: -1, trend: 2, projected: false, hyped: false, rare: false,
   };
@@ -28,11 +28,15 @@ function copyOf(h: Holding, items: Map<number, Item>): PricedCopy {
 }
 const summary = (copies: PricedCopy[]) => ({ copies: copies.length, value: copies.reduce((n, c) => n + effectiveValue(c.item), 0), rap: copies.reduce((n, c) => n + c.item.rap, 0) });
 const bySafeValue = (a: PricedCopy, b: PricedCopy) => effectiveValue(b.item) - effectiveValue(a.item) || a.item.name.localeCompare(b.item.name);
-export function diffInventory(before: Holding[], after: Holding[], items: Map<number, Item>): InventoryChange | null {
-  const previous = new Map(before.map(h => [h.userAssetId, h]));
-  const current = new Map(after.map(h => [h.userAssetId, h]));
-  const removed = before.filter(h => !current.has(h.userAssetId)).map(h => copyOf(h, items)).sort(bySafeValue);
-  const added = after.filter(h => !previous.has(h.userAssetId)).map(h => copyOf(h, items)).sort(bySafeValue);
+/** Permanently untradable copies are ignored on both sides: they are never shown, so their coming or going is not news. */
+export function diffInventory(previousHoldings: Holding[], currentHoldings: Holding[], items: Map<number, Item>): InventoryChange | null {
+  const before = visibleHoldings(previousHoldings), after = visibleHoldings(currentHoldings);
+  const identity = (h: Holding) => h.collectibleItemInstanceId ?? h.userAssetId;
+  const previous = new Map(before.map(h => [identity(h), h]));
+  const current = new Map(after.map(h => [identity(h), h]));
+  // A copy that left keeps the status it had when last seen; the recap says what went out, not what it is now.
+  const removed = before.filter(h => !current.has(identity(h))).map(h => copyOf(h, items)).sort(bySafeValue);
+  const added = after.filter(h => !previous.has(identity(h))).map(h => copyOf(h, items)).sort(bySafeValue);
   if (!removed.length && !added.length) return null;
   const lost = totals(removed), gained = totals(added);
   return {

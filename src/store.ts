@@ -11,7 +11,7 @@ export const DEFAULT_ARCHIVE: ArchivePolicy = { hours: 24, maxAds: 100_000 };
 
 interface Row { discord_id: string; roblox_id: number; username: string; preferences: string; alerts: number; alert_error: string | null; inventory_alerts: number }
 /** The last inventory seen for a user, kept so the monitor can tell which copies left or arrived since. */
-export interface InventorySnapshot { holdings: Holding[]; takenAt: number }
+export interface InventorySnapshot { holdings: Holding[]; takenAt: number; verified?: boolean }
 export class Store {
   private db: DatabaseSync;
   private archiveMs: number;
@@ -37,6 +37,8 @@ export class Store {
     // Databases created before inventory alerts existed lack the column; add it in place.
     const columns = (this.db.prepare('PRAGMA table_info(users)').all() as unknown as { name: string }[]).map(c => c.name);
     if (!columns.includes('inventory_alerts')) this.db.exec('ALTER TABLE users ADD COLUMN inventory_alerts INTEGER NOT NULL DEFAULT 0');
+    const snapshotColumns = this.db.prepare('PRAGMA table_info(inventory_snapshots)').all().map(c => c.name);
+    if (!snapshotColumns.includes('verified')) this.db.exec('ALTER TABLE inventory_snapshots ADD COLUMN verified INTEGER NOT NULL DEFAULT 0');
     // The ad archive is a rolling window: rows are deleted constantly, so the file has to be able to give space back.
     // Without incremental auto-vacuum SQLite keeps every page it has ever used, and the file only ever grows.
     const mode = (this.db.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number } | undefined)?.auto_vacuum;
@@ -95,11 +97,11 @@ export class Store {
   /** Users who asked to be told when their inventory changes. */
   inventoryWatchers(): UserProfile[] { return (this.db.prepare('SELECT * FROM users WHERE inventory_alerts = 1').all() as unknown as Row[]).map(row => this.decode(row)); }
   snapshot(discordId: string): InventorySnapshot | undefined {
-    const row = this.db.prepare('SELECT holdings, taken_at FROM inventory_snapshots WHERE discord_id = ?').get(discordId) as { holdings: string; taken_at: number } | undefined;
-    return row ? { holdings: JSON.parse(row.holdings) as Holding[], takenAt: Number(row.taken_at) } : undefined;
+    const row = this.db.prepare('SELECT holdings, taken_at, verified FROM inventory_snapshots WHERE discord_id = ?').get(discordId) as { holdings: string; taken_at: number; verified: number } | undefined;
+    return row ? { holdings: JSON.parse(row.holdings) as Holding[], takenAt: Number(row.taken_at), ...(row.verified ? { verified: true } : {}) } : undefined;
   }
-  saveSnapshot(discordId: string, holdings: Holding[], now = Date.now()): void {
-    this.db.prepare('INSERT OR REPLACE INTO inventory_snapshots VALUES (?, ?, ?)').run(discordId, JSON.stringify(holdings), now);
+  saveSnapshot(discordId: string, holdings: Holding[], now = Date.now(), verified = false): void {
+    this.db.prepare('INSERT OR REPLACE INTO inventory_snapshots (discord_id, holdings, taken_at, verified) VALUES (?, ?, ?, ?)').run(discordId, JSON.stringify(holdings), now, Number(verified));
   }
   clearSnapshot(discordId: string): void { this.db.prepare('DELETE FROM inventory_snapshots WHERE discord_id = ?').run(discordId); }
   requireCredentialKey(): Buffer {
@@ -121,7 +123,7 @@ export class Store {
   }
   session(discordId: string, robloxId: number): string {
     const row = this.db.prepare('SELECT roblox_id, ciphertext FROM roblox_sessions WHERE discord_id = ?').get(discordId) as { roblox_id: number; ciphertext: string } | undefined;
-    if (!row || row.roblox_id !== robloxId) throw new UserError('Use /connect to authorize sending trades from this Roblox account first.');
+    if (!row || row.roblox_id !== robloxId) throw new UserError('Use /connect to verify tradable inventory and authorize trades from this Roblox account.');
     try {
       const data = Buffer.from(row.ciphertext, 'base64');
       const decipher = createDecipheriv('aes-256-gcm', this.requireCredentialKey(), data.subarray(0, 12));

@@ -1,5 +1,5 @@
-import { effectiveValue, UserError, type Inventory, type Preferences, type UserProfile, type TradeAd } from './domain.js';
-import { affordableRange, outgoingBundles, priced, propose, REALISTIC_GAIN_PCT, recommendationKey, shapeDistance, sizeBand, type Evaluation, type Recommendation } from './engine.js';
+import { effectiveValue, UserError, type Holding, type Inventory, type Preferences, type UserProfile, type TradeAd } from './domain.js';
+import { affordableRange, evaluate, outgoingBundles, priced, propose, REALISTIC_GAIN_PCT, recommendationKey, sameAssets, shapeDistance, sizeBand, type Evaluation, type Recommendation, type PricedCopy } from './engine.js';
 
 export interface SearchOptions {
   /** Only offer copies of this item (downgrade mode: one item given for several received). */
@@ -37,6 +37,35 @@ export class SearchService {
   constructor(readonly provider: DataProvider, private maxSellers = 12, readonly archive?: AdArchive) {}
   /** Archive size and reach, for status panels. Absent when no archive is attached. */
   coverage(): ArchiveStats | undefined { return this.archive?.stats?.() ?? this.archive?.adCoverage(); }
+  /** A saved recommendation is only a candidate. Refresh quantities, targets and prices before delivering it. */
+  async refresh(user: UserProfile, recommendation: Recommendation): Promise<Recommendation | null> {
+    const [own, partner, items] = await Promise.all([
+      this.provider.inventory(user.robloxId, 0, user),
+      this.provider.inventory(recommendation.ad.userId, 0, user), this.provider.items(),
+    ]);
+    if (own.tradabilityError || partner.tradabilityError) throw new UserError(own.tradabilityError ?? partner.tradabilityError!);
+    if ([own.fetchedAt, partner.fetchedAt, items.fetchedAt].some(at => Date.now() - at > 300_000))
+      throw new UserError('Inventory verification became stale. The alert was not sent.');
+    if (Date.now() - recommendation.ad.createdAt > user.preferences.maxAdAgeMinutes * 60_000) return null;
+    const key = (c: Holding) => `${c.itemTarget?.itemType ?? 'Asset'}:${c.itemTarget?.targetId ?? c.assetId}`;
+    const select = (wanted: Holding[], available: PricedCopy[]) => {
+      const used = new Set<number | string>();
+      const selected: PricedCopy[] = [];
+      for (const expected of wanted) {
+        const copy = available.find(c => c.assetId === expected.assetId && key(c) === key(expected) && !used.has(c.userAssetId));
+        if (!copy) return null;
+        used.add(copy.userAssetId); selected.push(copy);
+      }
+      return selected;
+    };
+    const give = select(recommendation.give, priced(own, items.data));
+    const receive = select(recommendation.receive, priced(partner, items.data));
+    if (!give || !receive) return null;
+    const advertised = recommendation.ad.requesting.length > 0 && sameAssets(give, recommendation.ad.requesting);
+    const evaluation = evaluate(give, receive, user.preferences, advertised);
+    if (!evaluation.passes) return null;
+    return { ...recommendation, ...evaluation, ownInventoryAt: own.fetchedAt, partnerInventoryAt: partner.fetchedAt, pricesAt: items.fetchedAt };
+  }
   async search(user: UserProfile, preferences: Preferences = user.preferences, options: SearchOptions = {}): Promise<SearchResult> {
     if (this.active.has(user.discordId)) throw new UserError('A search is already running for you. Please wait for it to finish.');
     this.active.add(user.discordId);
@@ -44,14 +73,15 @@ export class SearchService {
     finally { this.active.delete(user.discordId); }
   }
   private async run(user: UserProfile, p: Preferences, options: SearchOptions): Promise<SearchResult> {
-    const [items, adSnapshot, inventory] = await Promise.all([this.provider.items(), this.provider.ads(), this.provider.inventory(user.robloxId)]);
+    const [items, adSnapshot, inventory] = await Promise.all([this.provider.items(), this.provider.ads(), this.provider.inventory(user.robloxId, undefined, user)]);
+    if (inventory.tradabilityError) throw new UserError(inventory.tradabilityError);
     let own = priced(inventory, items.data);
     if (options.giveOnly !== undefined) {
       const copy = own.find(c => c.assetId === options.giveOnly);
       if (!copy) throw new UserError('You do not have an available, non-projected copy of that item to give.');
       own = [copy];
     }
-    if (!own.length) throw new UserError('No available, non-projected items with supported Rolimons prices were found in this public inventory.');
+    if (!own.length) throw new UserError('No verified tradable, non-projected items with supported Rolimons prices were found in this public inventory.');
     // "Affordable" without a typed range means the band this inventory can pay for; alerts get the same treatment.
     if (p.affordable && p.minReceiveValue === null && p.maxReceiveValue === null) p = { ...p, ...affordableRange(own, REALISTIC_GAIN_PCT) };
     const inBand = (ad: TradeAd) => {
@@ -94,7 +124,7 @@ export class SearchService {
     const bySeller = new Map<number, { ads: TradeAd[]; score: number }>();
     // Price-screen every recent ad before spending requests on seller inventories.
     for (const ad of ads) {
-      const advertised = ad.offering.map((assetId, i) => ({ assetId, userAssetId: -(i + 1), onHold: false, item: items.data.get(assetId)! }));
+      const advertised = ad.offering.map((assetId, i) => ({ assetId, userAssetId: -(i + 1), onHold: false, tradable: true, item: items.data.get(assetId)! }));
       const previews = propose(ad, own, advertised, bundles, p);
       if (!previews.length) continue;
       const existing = bySeller.get(ad.userId) ?? { ads: [], score: -Infinity };
@@ -109,7 +139,11 @@ export class SearchService {
     // requests to Roblox one at a time; asking concurrently only overlaps the waiting, which is most of the cost.
     type Verified = { candidate: { ads: TradeAd[] }; inventory: Inventory; error?: undefined } | { error: UserError; candidate?: undefined; inventory?: undefined };
     const verified = await Promise.all(sellers.map(async ([sellerId, candidate]): Promise<Verified> => {
-      try { return { candidate, inventory: await this.provider.inventory(sellerId, PARTNER_INVENTORY_MS) }; }
+      try {
+        const inventory = await this.provider.inventory(sellerId, PARTNER_INVENTORY_MS, user);
+        if (inventory.tradabilityError) throw new UserError(inventory.tradabilityError);
+        return { candidate, inventory };
+      }
       catch (error) {
         if (!(error instanceof UserError)) throw error;
         return { error };

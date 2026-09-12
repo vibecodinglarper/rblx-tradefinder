@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { UserError, type UserProfile } from './domain.js';
+import { UserError, type UserProfile, type ItemTarget, type Snapshot } from './domain.js';
+import { Cache } from './http.js';
 import type { Recommendation } from './engine.js';
 import type { Store } from './store.js';
 import { inventoryRoute, retryDelay, robloxRoute, RobloxThrottle } from './roblox-throttle.js';
@@ -10,11 +11,21 @@ const identity = z.object({ id: userId, name: z.string().min(1) });
 const target = z.object({ itemType: z.string(), targetId: z.string() });
 const inventoryPage = z.object({
   userId,
-  items: z.array(z.object({ itemTarget: target, instances: z.array(z.object({
+  items: z.array(z.object({ itemTarget: target, itemName: z.string().optional(), recentAveragePrice: z.number().nullable().optional(), instances: z.array(z.object({
     collectibleItemInstanceId: z.string().min(1), itemTarget: target, isOnHold: z.boolean(),
+    itemName: z.string().optional(), recentAveragePrice: z.number().nullable().optional(),
   })) })),
   nextPageCursor: z.string().nullable(),
 });
+export interface TradableCopy {
+  itemTarget: ItemTarget; collectibleItemInstanceId: string; isOnHold: boolean;
+  name?: string; rap?: number | null;
+}
+export type TradableInventoryReader = (owner: number, viewer: UserProfile, maxAgeMs: number) => Promise<Snapshot<TradableCopy[]>>;
+const targetKey = (t: ItemTarget) => `${t.itemType}:${t.targetId}`;
+// Preserve existing asset-only send receipts across upgrades; bundles need an explicit type namespace.
+const signatureTargets = (targets: ItemTarget[]) => targets.map(t => t.itemType === 'Asset' ? Number(t.targetId) : targetKey(t))
+  .sort((a, b) => typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b)));
 export interface TradeRequest {
   senderOffer: { userId: number; robux: number; collectibleItemInstanceIds: string[] };
   recipientOffer: { userId: number; robux: number; collectibleItemInstanceIds: string[] };
@@ -162,36 +173,58 @@ export class RobloxTradesClient {
     if (!result.success) throw new UserError('Roblox trade limits could not be verified.');
     return result.data.maxItemsPerSide;
   }
-  /** Match quantities to fresh, distinct v2 instances. Asset IDs and numeric v1 copy IDs are never sent. */
-  async instances(owner: number, assets: number[]): Promise<string[]> {
-    const available = new Map<string, number>();
+  /** Complete authenticated inventory, including held copies and bundles. */
+  async tradableInventory(owner: number): Promise<Snapshot<TradableCopy[]>> {
+    const fetchedAt = Date.now();
+    const data: TradableCopy[] = [];
+    for await (const page of this.inventoryPages(owner)) data.push(...page);
+    return { data, fetchedAt };
+  }
+  private async *inventoryPages(owner: number): AsyncGenerator<TradableCopy[]> {
     const cursors = new Set<string>();
+    const copies = new Set<string>();
     let cursor = '';
     for (let page = 0; page < 100; page++) {
       const query = new URLSearchParams({ limit: '25', ...(cursor ? { cursor } : {}) });
       const parsed = inventoryPage.safeParse(await this.request(`/v2/users/${owner}/tradableItems?${query}`));
       if (!parsed.success || parsed.data.userId !== owner) throw new UserError('Roblox returned invalid tradable inventory data.');
+      const results: TradableCopy[] = [];
       for (const item of parsed.data.items) {
-        if (item.itemTarget.itemType !== 'Asset') continue;
+        if (item.itemTarget.itemType !== 'Asset' && item.itemTarget.itemType !== 'Bundle') throw new UserError('Roblox returned an unsupported tradable item type.');
+        if (!/^\d+$/.test(item.itemTarget.targetId) || !userId.safeParse(Number(item.itemTarget.targetId)).success) throw new UserError('Roblox returned an invalid item target.');
         for (const instance of item.instances) {
-          if (instance.isOnHold || instance.itemTarget.itemType !== 'Asset' || instance.itemTarget.targetId !== item.itemTarget.targetId) continue;
-          const asset = Number(instance.itemTarget.targetId);
-          if (assets.includes(asset)) available.set(instance.collectibleItemInstanceId, asset);
+          if (instance.itemTarget.itemType !== item.itemTarget.itemType || instance.itemTarget.targetId !== item.itemTarget.targetId)
+            throw new UserError('Roblox returned mismatched collectible instances.');
+          if (copies.has(instance.collectibleItemInstanceId)) throw new UserError('Tradable inventory changed during pagination. Run a new search.');
+          copies.add(instance.collectibleItemInstanceId);
+          results.push({ itemTarget: item.itemTarget as ItemTarget, collectibleItemInstanceId: instance.collectibleItemInstanceId,
+            isOnHold: instance.isOnHold, name: instance.itemName ?? item.itemName, rap: instance.recentAveragePrice ?? item.recentAveragePrice });
         }
       }
-      const selected: string[] = [];
-      for (const asset of assets) {
-        const entry = [...available].find(([id, idAsset]) => idAsset === asset && !selected.includes(id));
-        if (!entry) break;
-        selected.push(entry[0]);
-      }
-      if (selected.length === assets.length) return selected;
+      yield results;
       cursor = parsed.data.nextPageCursor ?? '';
-      if (!cursor) throw new UserError('One or more items are unavailable or on hold. Run a new search.');
+      if (!cursor) return;
       if (cursors.has(cursor)) throw new UserError('Roblox repeated an inventory page. Try a new search later.');
       cursors.add(cursor);
     }
     throw new UserError('This inventory is too large to verify completely. No trade was sent.');
+  }
+  /** Match quantities to fresh v2 instances by both type and ID. Numeric inputs are legacy asset targets. */
+  async instances(owner: number, targets: (number | ItemTarget)[]): Promise<string[]> {
+    const wanted = targets.map(t => targetKey(typeof t === 'number' ? { itemType: 'Asset', targetId: String(t) } : t));
+    const available = new Map<string, string>();
+    for await (const page of this.inventoryPages(owner)) {
+      for (const instance of page) if (!instance.isOnHold && wanted.includes(targetKey(instance.itemTarget)))
+        available.set(instance.collectibleItemInstanceId, targetKey(instance.itemTarget));
+      const selected: string[] = [];
+      for (const target of wanted) {
+        const entry = [...available].find(([id, idTarget]) => idTarget === target && !selected.includes(id));
+        if (!entry) break;
+        selected.push(entry[0]);
+      }
+      if (selected.length === wanted.length) return selected;
+    }
+    throw new UserError('One or more items are unavailable or on hold. Run a new search.');
   }
   async send(body: TradeRequest): Promise<number> {
     const result = z.object({ tradeId: userId }).safeParse(await this.request('/v2/trades/send', body));
@@ -218,9 +251,20 @@ interface PendingVerification {
 }
 export class TradingService {
   private pending = new Map<string, PendingVerification>();
+  private inventories = new Cache();
   constructor(private store: Store, private fetcher: typeof fetch = fetch, private throttle = new RobloxThrottle()) {}
   cancelVerification(discordId: string): void { this.pending.delete(discordId); }
   available(): void { this.store.requireCredentialKey(); }
+  /** Scope cached reads to the requesting account and its current session; never borrow another user's cookie. */
+  async inventory(owner: number, viewer: UserProfile, maxAgeMs = 60_000): Promise<Snapshot<TradableCopy[]>> {
+    const cookie = this.store.session(viewer.discordId, viewer.robloxId);
+    const sessionHash = createHash('sha256').update(cookie).digest('hex');
+    return this.inventories.get(`${viewer.discordId}:${viewer.robloxId}:${sessionHash}:${owner}`, maxAgeMs, async () => {
+      const result = await new RobloxTradesClient(cookie, this.fetcher, Date.now() + 120_000, this.throttle).tradableInventory(owner);
+      if (this.store.session(viewer.discordId, viewer.robloxId) !== cookie) throw new UserError('Your Roblox connection changed. Check inventory again.');
+      return result;
+    });
+  }
   async connect(discordId: string, input: string) {
     this.available();
     const cookie = normalizeCookie(input);
@@ -244,12 +288,15 @@ export class TradingService {
       const partner = recommendation.ad.userId;
       await client.checkEligibility(user.robloxId, partner);
       const max = Math.min(4, await client.maxItems());
-      const give = recommendation.give.map(c => c.assetId), receive = recommendation.receive.map(c => c.assetId);
+      if ([...recommendation.give, ...recommendation.receive].some(c => c.tradable !== true || c.onHold || c.unmappedBundle))
+        throw new UserError('This offer includes an unverified or non-tradable item. Run a new search.');
+      const give = recommendation.give.map(c => c.itemTarget ?? { itemType: 'Asset' as const, targetId: String(c.assetId) });
+      const receive = recommendation.receive.map(c => c.itemTarget ?? { itemType: 'Asset' as const, targetId: String(c.assetId) });
       if (!give.length || !receive.length || give.length > max || receive.length > max) throw new UserError('This offer exceeds Roblox’s item limits. Run a new search.');
       if (recommendation.ad.offeringRobux || recommendation.ad.requestingRobux) throw new UserError('Sending trades with Robux is not supported.');
       const [sender, recipient] = await Promise.all([client.instances(user.robloxId, give), client.instances(partner, receive)]);
       if (new Set([...sender, ...recipient]).size !== sender.length + recipient.length) throw new UserError('Roblox returned overlapping collectible instances. Run a new search.');
-      const signature = createHash('sha256').update(JSON.stringify([user.robloxId, partner, [...give].sort((a,b) => a-b), [...receive].sort((a,b) => a-b)])).digest('hex');
+      const signature = createHash('sha256').update(JSON.stringify([user.robloxId, partner, signatureTargets(give), signatureTargets(receive)])).digest('hex');
       this.store.claimTrade(signature);
       let tradeId: number;
       try {

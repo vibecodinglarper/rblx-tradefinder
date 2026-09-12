@@ -50,7 +50,7 @@ export const realisticGain = (mode: string): number => (mode === 'downgrade' ? 3
 export function priced(inventory: Inventory, items: Map<number, Item>): PricedCopy[] {
   return inventory.holdings.flatMap(h => {
     const item = items.get(h.assetId);
-    return !h.onHold && item && !item.projected && effectiveValue(item) > 0
+    return h.tradable === true && !h.onHold && !h.unmappedBundle && item && !item.projected && effectiveValue(item) > 0
       ? [{ ...h, item }] : [];
   });
 }
@@ -72,7 +72,7 @@ export function totals(copies: PricedCopy[]): Totals {
   };
 }
 export function selectCopies(ids: number[], inventory: PricedCopy[]): PricedCopy[] | null {
-  const used = new Set<number>();
+  const used = new Set<number | string>();
   const copies: PricedCopy[] = [];
   for (const id of ids) {
     const copy = inventory.find(c => c.assetId === id && !used.has(c.userAssetId));
@@ -107,6 +107,7 @@ export function evaluate(give: PricedCopy[], receive: PricedCopy[], p: Preferenc
   if (!give.length || !receive.length || give.length > 4 || receive.length > 4) failures.push('Each side must contain 1–4 copies.');
   if (new Set([...give, ...receive].map(c => c.userAssetId)).size !== give.length + receive.length) failures.push('A unique item copy appears more than once.');
   if ([...give, ...receive].some(c => c.onHold)) failures.push('An item is on hold.');
+  if ([...give, ...receive].some(c => c.tradable !== true || c.unmappedBundle)) failures.push('An item is non-tradable or has not been verified.');
   if (giving.value <= 0 || receiving.value <= 0) failures.push('Value is unavailable or zero.');
   if (give.some(g => receive.some(r => r.assetId === g.assetId))) failures.push('Same item appears on both sides; redundant exchanges are excluded.');
   if (p.mode !== 'any' && p.mode !== mode) failures.push(`Does not fit ${p.mode} mode.`);
@@ -192,7 +193,7 @@ export const emptyBundles = (): BundleIndex => ({ all: [], bySize: [] });
 /** Bound exponential work while retaining requested copies and the items people actually trade around. */
 export function outgoingBundles(own: PricedCopy[], ads: TradeAd[], cap = 28): { bundles: BundleIndex; truncated: boolean } {
   const wanted = new Set(ads.flatMap(a => a.requesting));
-  const sorted = [...own].sort((a, b) => effectiveValue(a.item) - effectiveValue(b.item) || a.userAssetId - b.userAssetId);
+  const sorted = [...own].sort((a, b) => effectiveValue(a.item) - effectiveValue(b.item) || String(a.userAssetId).localeCompare(String(b.userAssetId), 'en', { numeric: true }));
   // At most four interchangeable copies of an asset are useful in a trade.
   const counts = new Map<number, number>();
   const useful = sorted.filter(c => { const n = (counts.get(c.assetId) ?? 0) + 1; counts.set(c.assetId, n); return n <= 4; });

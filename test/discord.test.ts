@@ -39,7 +39,8 @@ test('recommendation embeds contain calculations, unique copies and valid profil
   const alertEmbed = alert.embeds[0]!.toJSON();
   assert.equal(alertEmbed.image?.url, 'attachment://trade-1.png'); assert.equal(alertEmbed.thumbnail?.url, 'https://tr.rbxcdn.com/c.png');
   assert.match(alertEmbed.title!, /🔔 🟢 \+10 value \(\+10%\)/); assert.match(alertEmbed.description!, /Open the trade window with ExampleSeller/);
-  assert.equal(alertEmbed.fields, undefined);
+  assert.match(alertEmbed.fields?.[0]?.name ?? '', /Tradability checked/);
+  assert.match(JSON.stringify(alertMessage(result.recommendations[0]!).embeds[0]!.toJSON()), /✅ Tradable/);
   const [alertLinks, alertActions] = alert.components.map(c => c.toJSON());
   assert.ok(alertLinks!.components.every(b => 'url' in b && b.url.includes('/trade#tradefinder')));
   assert.deepEqual(alertActions!.components.map(b => ('custom_id' in b ? b.custom_id.split(':')[1] : '')), ['alerts']);

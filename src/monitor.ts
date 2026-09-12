@@ -51,6 +51,7 @@ export class Monitor {
         const perScan = user.preferences.alertsPerScan;
         const budget = Math.min(perScan, alertHourlyCap(perScan) - this.store.sentCount(user.discordId, 3_600_000));
         const sellers = new Map<number, number>();
+        const checked = new Set<number>();
         // Downgrades are the harder shape to find and the one people ask for, so each batch leads with them and then
         // alternates, rather than letting a run of upgrades use up the whole budget.
         const downs = result.recommendations.filter(r => r.mode === 'downgrade');
@@ -66,7 +67,14 @@ export class Monitor {
           if ((sellers.get(r.ad.userId) ?? 0) >= PER_SELLER) continue;
           const key = alertKey(r);
           if (this.store.seen(user.discordId, key)) continue;
-          try { await this.send(user.discordId, r); }
+          if (checked.has(r.ad.userId)) continue;
+          checked.add(r.ad.userId);
+          // Search snapshots can age while later sellers are checked or earlier DMs are delivered.
+          // Never substitute an unavailable item or fall back to a cached recommendation after a failed check.
+          const fresh = await this.search.refresh(user, r);
+          if (!fresh) continue;
+          if (this.stopped || !this.unchanged(user)) break;
+          try { await this.send(user.discordId, fresh); }
           catch (error) {
             deliveryFailed = true;
             const current = this.unchanged(user);
@@ -103,16 +111,16 @@ export class Monitor {
     for (const user of this.store.inventoryWatchers()) {
       if (this.stopped) break;
       try {
-        const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId), this.search.provider.items()]);
+        const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId, 0, user), this.search.provider.items()]);
+        if (inventory.tradabilityError) throw new UserError(inventory.tradabilityError);
         const previous = this.store.snapshot(user.discordId);
         if (!this.unchanged(user)) continue;
-        if (!previous) { this.store.saveSnapshot(user.discordId, inventory.holdings, inventory.fetchedAt); continue; }
-        // A suddenly empty inventory is far more likely a privacy change or API hiccup than everything selling at once.
-        if (!inventory.holdings.length && previous.holdings.length) { this.note(user, 'Your inventory came back empty (private, or Roblox hiccup); the change check was skipped.'); continue; }
+        // Switching from legacy public snapshots must not produce a fictitious mass purchase of bundles.
+        if (!previous?.verified) { this.store.saveSnapshot(user.discordId, inventory.holdings, inventory.fetchedAt, true); continue; }
         const change = diffInventory(previous.holdings, inventory.holdings, items.data);
-        if (!change) continue;
+        if (!change) { this.store.saveSnapshot(user.discordId, inventory.holdings, inventory.fetchedAt, true); continue; }
         if (this.sendChange) await this.sendChange(user, change, inventory.fetchedAt);
-        if (this.unchanged(user)) this.store.saveSnapshot(user.discordId, inventory.holdings, inventory.fetchedAt);
+        if (this.unchanged(user)) this.store.saveSnapshot(user.discordId, inventory.holdings, inventory.fetchedAt, true);
       } catch (error) {
         const current = this.unchanged(user);
         if (!current) continue;

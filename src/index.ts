@@ -1,6 +1,7 @@
 import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { config } from './config.js';
 import { Providers } from './providers.js';
+import { TradingService } from './trading.js';
 import { SearchService } from './search.js';
 import { Store } from './store.js';
 import { Bot } from './bot.js';
@@ -39,7 +40,8 @@ async function main() {
   const env = config();
   const store = new Store(env.DATABASE_PATH, { hours: env.AD_ARCHIVE_HOURS, maxAds: env.AD_ARCHIVE_MAX_ADS }, env.ROBLOX_CREDENTIAL_KEY);
   const client = new Client({ intents: [GatewayIntentBits.Guilds], allowedMentions: { parse: [] } });
-  const providers = new Providers();
+  const trading = new TradingService(store);
+  const providers = new Providers(undefined, (owner, viewer, maxAgeMs) => trading.inventory(owner, viewer, maxAgeMs));
   const search = new SearchService(providers, env.MAX_SELLERS_PER_SEARCH, store);
   // The API holds about three minutes of ads, so polling every 60 s captures every ad with margin even without the trades page.
   let lastCollectedAt = 0;
@@ -58,7 +60,7 @@ async function main() {
     } catch (error) { console.error('Ad collection failed:', error instanceof Error ? error.message : 'Unknown error'); }
   };
   const collector = setInterval(() => { void collect(); }, 60_000);
-  const bot = new Bot(store, search, env.POLL_INTERVAL_SECONDS);
+  const bot = new Bot(store, search, env.POLL_INTERVAL_SECONDS, trading);
   const monitor = new Monitor(store, search, async (id, r) => {
     const user = await client.users.fetch(id);
     // Same card as the trade finder; the rendered image is decoration, so a render failure falls back to text.

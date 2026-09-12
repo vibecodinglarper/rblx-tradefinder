@@ -105,8 +105,27 @@ export interface Item {
   demand: number; trend: number; projected: boolean; hyped: boolean; rare: boolean;
 }
 /** Roblox reports a name and recent average price per copy; they are the fallback when Rolimons does not track the item. */
-export interface Holding { assetId: number; userAssetId: number; onHold: boolean; name?: string; robloxRap?: number | null }
-export interface Inventory { userId: number; holdings: Holding[]; fetchedAt: number }
+export interface ItemTarget { itemType: 'Asset' | 'Bundle'; targetId: string }
+export interface Holding {
+  /** Rolimons pricing ID; migrated bundles retain the original face ID when mapped. */
+  assetId: number; userAssetId: number | string; onHold: boolean; name?: string; robloxRap?: number | null;
+  /** Only an authenticated, complete inventory check can establish this. Undefined means unchecked. */
+  tradable?: boolean;
+  itemTarget?: ItemTarget;
+  collectibleItemInstanceId?: string;
+  unmappedBundle?: boolean;
+}
+export interface Inventory { userId: number; holdings: Holding[]; fetchedAt: number; tradabilityError?: string }
+export type TradabilityTag = 'Tradable' | 'On hold' | 'Not tradable' | 'Tradability unknown';
+export const tradabilityTag = (holding: Holding): TradabilityTag =>
+  holding.tradable === undefined ? 'Tradability unknown' : holding.onHold ? 'On hold' : holding.tradable ? 'Tradable' : 'Not tradable';
+/**
+ * A verified copy that can never be traded (a retained classic face, a stale public row): unlike a copy on hold, it
+ * has no trading future, so inventories, change recaps and trade proposals leave it out entirely.
+ */
+export const permanentlyUntradable = (holding: Holding): boolean => holding.tradable === false && !holding.onHold;
+/** The copies worth showing: everything except what is permanently untradable. */
+export const visibleHoldings = (holdings: Holding[]): Holding[] => holdings.filter(h => !permanentlyUntradable(h));
 export interface TradeAd {
   id: number; createdAt: number; userId: number; username: string;
   offering: number[]; requesting: number[]; tags: number[]; offeringRobux: number; requestingRobux: number;

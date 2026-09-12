@@ -4,7 +4,7 @@ import { defaults, effectiveValue, type Item, type Preferences } from '../src/do
 import { emptyBundles, evaluate, outgoingBundles, priced, propose, selectCopies, totals, affordableRange } from '../src/engine.js';
 import { ad, fixtureProvider, inventory, item, proposalProvider } from './fixtures.js';
 
-const copy = (id: number, value: number, copyId = id) => ({ assetId: id, userAssetId: copyId, onHold: false, item: item(id, value) });
+const copy = (id: number, value: number, copyId = id) => ({ assetId: id, userAssetId: copyId, onHold: false, tradable: true, item: item(id, value) });
 test('upgrade calculates gains, overpay and counterparty loss with their correct denominators', () => {
   // A real upgrade: two copies consolidated into one better item, carrying the overpay that gets it accepted.
   const r = evaluate([copy(1, 50), copy(2, 50)], [copy(3, 90)], { ...defaults(), mode: 'upgrade' });
@@ -17,7 +17,7 @@ test('upgrade calculates gains, overpay and counterparty loss with their correct
   assert.ok(Math.abs(partner.partnerLossPct - 1000 / 100) < 1e-9);
 });
 test('a trade is a RAP trade once 30% of the value on the table comes from items with no Rolimons value', () => {
-  const rap = (id: number, value: number) => ({ assetId: id, userAssetId: id, onHold: false, item: item(id, value, { value: null }) });
+  const rap = (id: number, value: number) => ({ assetId: id, userAssetId: id, onHold: false, tradable: true, item: item(id, value, { value: null }) });
   // 50 of 190 (26%) is RAP-only: still a value trade, so only the 'rap' filter turns it away.
   const mostlyValued = evaluate([rap(1, 50), copy(2, 50)], [copy(3, 90)], defaults());
   assert.equal(mostlyValued.kind, 'value'); assert.ok(Math.abs(mostlyValued.rapShare - 5000 / 190) < 1e-9);

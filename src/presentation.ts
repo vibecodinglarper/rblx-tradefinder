@@ -2,7 +2,7 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown, ModalBuilder, StringSelectMenuBuilder,
   TextInputBuilder, TextInputStyle, type BaseMessageOptions,
 } from 'discord.js';
-import { alertHourlyCap, defaults as defaultPreferences, effectiveValue, idSchema, modeSchema, RAP_TRADE_PCT, UserError, type Item, type Mode, type Preferences, type TradeKind, type UserProfile } from './domain.js';
+import { alertHourlyCap, defaults as defaultPreferences, effectiveValue, idSchema, modeSchema, RAP_TRADE_PCT, tradabilityTag, UserError, type Item, type Mode, type Preferences, type TradeKind, type UserProfile } from './domain.js';
 import { downgradeWindow, upgradeWindow, type Evaluation, type PricedCopy, type Recommendation } from './engine.js';
 import type { ArchiveStats, SearchResult } from './search.js';
 import { formatRange, formatMixedRange, mixedRangeText, type Range } from './amounts.js';
@@ -97,7 +97,7 @@ const navButtons = nav;
 
 // ---------- Trade rendering ----------
 function itemLine(c: PricedCopy): string {
-  const flags = [c.item.projected && '📈 projected', c.item.hyped && '🔥 hyped', c.item.rare && '💎 rare'].filter(Boolean).join(' · ');
+  const flags = [tagLabel(tradabilityTag(c)), c.item.projected && '📈 projected', c.item.hyped && '🔥 hyped', c.item.rare && '💎 rare'].filter(Boolean).join(' · ');
   return `**[${escapeMarkdown(clip(c.item.name, 60))}](${links.item(c.assetId)})**\n`
     + `\`V ${number(effectiveValue(c.item))}${c.item.value === null ? ' (= RAP)' : ''}\` \`RAP ${number(c.item.rap)}\` · ${demandLabel(c.item.demand)} demand\n`
     + `ID ${c.assetId} · Copy ${c.userAssetId}${flags ? ` · ${flags}` : ''}`;
@@ -226,7 +226,8 @@ export function alertMessage(r: Recommendation, options: { card?: boolean; chara
     .setDescription(`**${escapeMarkdown(clip(r.ad.username, 20))}** · [Profile](${links.profile(r.ad.userId)}) · [Rolimons](${links.player(r.ad.userId)}) · ad ${time(r.ad.createdAt)}\n🔁 [Open the trade window with ${escapeMarkdown(clip(r.ad.username, 20))}](${tradeUrl(r)})`)
     .setTimestamp(r.ad.createdAt);
   if (options.card) embed.setImage('attachment://trade-1.png');
-  else embed.addFields({ name: '📤 You give', value: names(r.give) || '—', inline: true }, { name: '📥 You get', value: names(r.receive) || '—', inline: true });
+  else embed.addFields({ name: '📤 You give', value: side(r.give), inline: true }, { name: '📥 You get', value: side(r.receive), inline: true });
+  embed.addFields({ name: '🕒 Tradability checked', value: `Your items ${time(r.ownInventoryAt)} · Their items ${time(r.partnerInventoryAt)}` });
   return message(embed,
     row(link(clip(`Trade with ${r.ad.username}`, 80), tradeUrl(r), '🔁')),
     row(button(ids.build('alerts', 'off'), 'Stop alerts', ButtonStyle.Danger, '🔕')));
@@ -558,9 +559,13 @@ export function inventoryAlertsMessage(user: UserProfile, copies?: number) {
   return message(embed, row(nav.inventoryAlerts(user.inventoryAlerts), nav.inventory()));
 }
 const changeLine = (copies: PricedCopy[]) => {
-  const counts = new Map<number, { id: number; name: string; n: number; value: number }>();
-  for (const c of copies) { const e = counts.get(c.assetId); if (e) e.n++; else counts.set(c.assetId, { id: c.assetId, name: c.item.name, n: 1, value: effectiveValue(c.item) }); }
-  return [...counts.values()].map(e => `[${escapeMarkdown(clip(e.name, 40))}](${links.item(e.id)})${e.n > 1 ? ` **×${e.n}**` : ''} · ${e.value > 0 ? `${statIcons.value} ${number(e.value)}` : 'no price'}`).join('\n').slice(0, 1024) || '—';
+  const counts = new Map<string, { id: number; name: string; n: number; value: number; status: string }>();
+  for (const c of copies) {
+    const status = tradabilityTag(c), key = `${c.itemTarget?.itemType ?? 'Asset'}:${c.itemTarget?.targetId ?? c.assetId}:${status}`;
+    const e = counts.get(key); if (e) e.n++;
+    else counts.set(key, { id: c.assetId, name: c.item.name, n: 1, value: effectiveValue(c.item), status });
+  }
+  return [...counts.values()].map(e => `[${escapeMarkdown(clip(e.name, 40))}](${links.item(e.id)})${e.n > 1 ? ` **×${e.n}**` : ''} · ${e.value > 0 ? `${statIcons.value} ${number(e.value)}` : 'no price'} · ${tagLabel(e.status)}`).join('\n').slice(0, 1024) || '—';
 };
 /**
  * DM sent when the monitor notices copies leaving or joining the inventory. `card` says whether a rendered
@@ -594,9 +599,9 @@ export function linkMessage(roblox: { id: number; name: string }, copies: number
     .addFields({ name: 'Roblox ID', value: `\`${roblox.id}\``, inline: true }, { name: 'Public copies', value: `${copies}`, inline: true })
   return message(embed, row(nav.find(), nav.inventory(), link('Rolimons', links.player(roblox.id), '📈')));
 }
-export interface InventoryPage { view: InventoryView; page: number; pages: number; entries: InventoryEntry[]; total: number; copies: number; value: number; rap: number }
-const TAG_EMOJI: Record<string, string> = { rare: '💎', projected: '📈', hyped: '🔥', unpriced: '❔', 'on hold': '⏳' };
-const tagLabel = (tag: string) => `${TAG_EMOJI[tag] ?? TAG_EMOJI['on hold']} ${tag}`;
+export interface InventoryPage { view: InventoryView; page: number; pages: number; entries: InventoryEntry[]; total: number; copies: number; value: number; rap: number; note?: string }
+const TAG_EMOJI: Record<string, string> = { Tradable: '✅', 'On hold': '⏳', 'Not tradable': '🚫', 'Tradability unknown': '❔', rare: '💎', projected: '📈', hyped: '🔥', unpriced: '❔', 'on hold': '⏳' };
+const tagLabel = (tag: string) => `${TAG_EMOJI[tag] ?? (/^\d+\/\d+ tradable$/.test(tag) ? '✅' : TAG_EMOJI['on hold'])} ${tag}`;
 /** Paged inventory: a rendered grid of item squares (attached as inventory.png) or a plain text list, with a toggle between them. */
 export function inventoryMessage(user: UserProfile, inv: InventoryPage, avatar?: Avatar) {
   const grid = inv.view === 'grid';
@@ -605,10 +610,11 @@ export function inventoryMessage(user: UserProfile, inv: InventoryPage, avatar?:
     .setAuthor(author(`${user.username}'s inventory`, null, avatar))
     .setTitle(`🎒 ${inv.total} item${inv.total === 1 ? '' : 's'} · ${inv.copies} cop${inv.copies === 1 ? 'y' : 'ies'}`)
     .addFields(
-      { name: `${statIcons.value === 'V' ? '💰' : statIcons.value} Value`, value: number(inv.value), inline: true },
-      { name: `${statIcons.rap === 'RAP' ? '📊' : statIcons.rap} RAP`, value: number(inv.rap), inline: true },
+      { name: `${statIcons.value === 'V' ? '💰' : statIcons.value} Tradable value`, value: number(inv.value), inline: true },
+      { name: `${statIcons.rap === 'RAP' ? '📊' : statIcons.rap} Tradable RAP`, value: number(inv.rap), inline: true },
     )
     .setTimestamp();
+  if (inv.note) embed.setFooter({ text: inv.note });
   if (grid) { embed.setImage('attachment://inventory.png'); if (!inv.total) embed.setDescription('*No collectible items were found in this public inventory.*'); }
   else embed.setDescription(inv.entries.map((e, i) => {
     const name = `[${escapeMarkdown(clip(e.name, 40))}](${links.item(e.assetId)})${e.quantity > 1 ? ` **${e.quantity}x**` : ''}`;
@@ -630,9 +636,9 @@ export function deletedMessage() {
 // ---------- Help ----------
 export function helpMessage() {
   const embed = new EmbedBuilder().setColor(Colors.brand).setTitle('👋 Tradefinder')
-    .setDescription('Finds Roblox limited-item trades from recent Rolimons trade ads and checks both inventories. Use /connect to enable Place Trade, then click it to send the displayed offer.')
+    .setDescription('Finds Roblox limited-item trades from recent Rolimons trade ads and checks both inventories. Use /connect to verify tradable items and enable recommendations. Click Place Trade to send a reviewed offer.')
     .addFields(
-      { name: '1️⃣ Link', value: '🔗 `/connect` connects your Roblox session for sending. `/trade link` tracks a public inventory without sending access. `/disconnect` removes the saved session.', inline: false },
+      { name: '1️⃣ Link', value: '🔗 `/connect` connects your Roblox session for inventory verification and sending. `/trade link` tracks a public inventory without sending access. `/disconnect` removes the saved session.', inline: false },
       { name: '2️⃣ Set up', value: '⚙️ `/trade settings` — your account, filters and lists · 💰 `/trade profit` — how much profit or loss you will take.', inline: false },
       { name: '3️⃣ Search', value: '🔎 `/trade find` — pick a mode, a trade kind (value, RAP or both) and a target, then press Find trades. Review an offer and click its numbered Place Trade button to send it.', inline: false },
       { name: '4️⃣ Wanted items', value: '⭐ `/trade watch` saves the items you want to receive and per-item profit rules.', inline: false },
@@ -661,7 +667,7 @@ export function connectedMessage(account: { id: number; name: string }) {
 }
 export function disconnectedMessage() {
   return message(new EmbedBuilder().setColor(Colors.success).setTitle('Roblox session removed')
-    .setDescription('Bot trade sending is disabled. Your public inventory settings remain. Trades already sent remain outbound on Roblox.'));
+    .setDescription('Recommendations and trade sending are disabled until you reconnect. Your public inventory settings remain. Trades already sent remain outbound on Roblox.'));
 }
 export function tradeSentMessage(tradeId: number) {
   return message(new EmbedBuilder().setColor(Colors.success).setTitle('Outbound trade sent')

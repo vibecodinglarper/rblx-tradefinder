@@ -4,10 +4,68 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
-import { alertHourlyCap } from '../src/domain.js';
+import { alertHourlyCap, UserError } from '../src/domain.js';
 import { Monitor } from '../src/monitor.js';
 import { SearchService } from '../src/search.js';
 import { ad, fixtureProvider, inventory, item, profile } from './fixtures.js';
+
+test('trade DMs recheck both inventories without cached reads and suppress copies lost after discovery', async () => {
+  for (const owner of [1, 2]) for (const condition of ['missing', 'held', 'non-tradable', 'unknown', 'failure']) {
+    const store = new Store(':memory:'), user = profile(); user.alerts = true; store.save(user);
+    const provider = fixtureProvider(), original = provider.inventory.bind(provider);
+    let invalidate = true, sends = 0;
+    const refreshed: number[] = [];
+    provider.inventory = async (id, age, viewer) => {
+      const inv = await original(id);
+      if (age !== 0) return inv;
+      assert.equal(viewer?.discordId, user.discordId);
+      refreshed.push(id);
+      if (!invalidate || id !== owner) return { ...inv, fetchedAt: Date.now() };
+      if (condition === 'failure') throw new UserError('Verification unavailable.');
+      return { ...inv, fetchedAt: Date.now(), holdings: condition === 'missing' ? [] : inv.holdings.map(c => ({ ...c,
+        onHold: condition === 'held', tradable: condition === 'non-tradable' ? false : condition === 'unknown' ? undefined : true })) };
+    };
+    const monitor = new Monitor(store, new SearchService(provider), async (_id, r) => {
+      sends++;
+      assert.ok([...r.give, ...r.receive].every(c => c.tradable === true && !c.onHold));
+    });
+    try {
+      await monitor.tick();
+      assert.equal(sends, 0, `${owner}: ${condition}`);
+      assert.deepEqual(refreshed.sort(), [1, 2]);
+      assert.equal(store.sentCount(user.discordId, 3_600_000), 0, 'suppressed alerts are not marked delivered');
+      invalidate = false;
+      await monitor.tick();
+      assert.equal(sends, 1, 'a later valid trade can still be delivered');
+    } finally { await monitor.stop(); store.close(); }
+  }
+});
+
+test('disabling alerts during the final inventory check prevents the DM', async () => {
+  const store = new Store(':memory:'), user = profile(); user.alerts = true; store.save(user);
+  const provider = fixtureProvider(), original = provider.inventory.bind(provider);
+  provider.inventory = async (id, age) => {
+    if (age === 0) { user.alerts = false; store.save(user); }
+    return original(id);
+  };
+  let sent = false;
+  const monitor = new Monitor(store, new SearchService(provider), async () => { sent = true; });
+  try { await monitor.tick(); assert.equal(sent, false); }
+  finally { await monitor.stop(); store.close(); }
+});
+
+test('final DM validation preserves bundle targets and quantities, never replacing one with a classic asset', async () => {
+  const provider = fixtureProvider();
+  const target = { itemType: 'Bundle' as const, targetId: '163046677043335' };
+  provider.inventories.get(1)!.holdings[0]!.itemTarget = target;
+  const search = new SearchService(provider), user = profile();
+  const recommendation = (await search.search(user)).recommendations[0]!;
+  assert.ok(await search.refresh(user, recommendation));
+  delete provider.inventories.get(1)!.holdings[0]!.itemTarget;
+  assert.equal(await search.refresh(user, recommendation), null);
+  provider.inventories.get(1)!.holdings[0]!.itemTarget = target;
+  assert.equal(await search.refresh(user, { ...recommendation, give: [recommendation.give[0]!, recommendation.give[0]!] }), null);
+});
 
 test('SQLite saves preferences and deduplication across restarts; forget removes both', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tradefinder-'));
