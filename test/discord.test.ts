@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { commandJSON } from '../src/commands.js';
-import { recommendationMessage } from '../src/presentation.js';
+import { alertMessage, recommendationMessage } from '../src/presentation.js';
 import { SearchService } from '../src/search.js';
 import { fixtureProvider, profile } from './fixtures.js';
 
@@ -9,7 +9,9 @@ test('slash command definition is valid and within Discord limits', () => {
   assert.equal(commandJSON.length, 1); assert.equal(commandJSON[0]?.name, 'trade');
   assert.ok(commandJSON[0]!.options!.length <= 25);
   const names = commandJSON[0]!.options!.map(o => o.name);
-  for (const expected of ['link', 'inventory', 'find', 'analyze', 'settings', 'watch', 'lock', 'alerts', 'forget']) assert.ok(names.includes(expected));
+  for (const expected of ['link', 'inventory', 'find', 'profit', 'settings', 'watch', 'alerts', 'delete']) assert.ok(names.includes(expected));
+  // Every subcommand runs bare: no typed options, so each one opens a panel or form instead.
+  for (const sub of commandJSON[0]!.options!) assert.equal((sub as { options?: unknown[] }).options?.length ?? 0, 0, `${sub.name} should take no options`);
 });
 test('recommendation embeds contain calculations, unique copies and valid profile links within Discord limits', async () => {
   const result = await new SearchService(fixtureProvider()).search(profile());
@@ -28,7 +30,17 @@ test('recommendation embeds contain calculations, unique copies and valid profil
   const [linksRow, actionsRow] = message.components.map(c => c.toJSON());
   assert.ok(linksRow!.components.every(b => 'url' in b && b.url.startsWith('https://')));
   assert.ok(actionsRow!.components.every(b => 'custom_id' in b && b.custom_id.startsWith('tf:') && b.custom_id.length <= 100));
-  assert.equal(actionsRow!.components.length, 2);
-  assert.equal(recommendationMessage(result.recommendations[0]!, { alert: true }).components[1]!.toJSON().components.length, 3);
+  assert.equal(actionsRow!.components.length, 1);
+  assert.equal(recommendationMessage(result.recommendations[0]!, { alert: true }).components[1]!.toJSON().components.length, 2);
   assert.deepEqual(message.allowedMentions.parse, []);
+  // Alert DMs use the trade finder's card layout: image plus seller line, with the trade link and Re-check / Stop alerts buttons.
+  const alert = alertMessage(result.recommendations[0]!, { card: true, character: 'https://tr.rbxcdn.com/c.png' });
+  const alertEmbed = alert.embeds[0]!.toJSON();
+  assert.equal(alertEmbed.image?.url, 'attachment://trade-1.png'); assert.equal(alertEmbed.thumbnail?.url, 'https://tr.rbxcdn.com/c.png');
+  assert.match(alertEmbed.title!, /🔔 🟢 \+10 value \(\+10%\)/); assert.match(alertEmbed.description!, /Open the trade window with ExampleSeller/);
+  assert.equal(alertEmbed.fields, undefined);
+  const [alertLinks, alertActions] = alert.components.map(c => c.toJSON());
+  assert.ok(alertLinks!.components.every(b => 'url' in b && b.url.includes('/trade#tradefinder')));
+  assert.deepEqual(alertActions!.components.map(b => ('custom_id' in b ? b.custom_id.split(':')[1] : '')), ['alerts']);
+  assert.ok(alertMessage(result.recommendations[0]!).embeds[0]!.toJSON().fields?.some(f => f.name === '📤 You give'));
 });

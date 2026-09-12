@@ -1,0 +1,2 @@
+- `rolimons.svg` — Rolimons favicon (https://www.rolimons.com/favicon.svg), used as the value icon next to Rolimons figures.
+- `robux-2014.svg` — 2014–2019 Robux "R$" icon, public domain via Wikimedia Commons (File:ROBUX_2014_Logo.svg), used as the RAP icon.

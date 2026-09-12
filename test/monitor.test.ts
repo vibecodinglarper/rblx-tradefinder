@@ -4,9 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
+import { alertHourlyCap } from '../src/domain.js';
 import { Monitor } from '../src/monitor.js';
 import { SearchService } from '../src/search.js';
-import { fixtureProvider, profile } from './fixtures.js';
+import { ad, fixtureProvider, inventory, item, profile } from './fixtures.js';
 
 test('SQLite saves preferences and deduplication across restarts; forget removes both', () => {
   const dir = mkdtempSync(join(tmpdir(), 'tradefinder-'));
@@ -57,4 +58,95 @@ test('disabling alerts, changing preferences or forgetting during a search preve
     if (action === 'forget') assert.equal(store.get(user.discordId), undefined);
     await monitor.stop(); store.close();
   }
+});
+
+test('alerts send one per seller per scan, treat a different give-bundle for the same item as the same alert, and stop at the hourly cap', async () => {
+  // Seller 2 offers item 30 (110) in one ad and item 40 (48, so giving item 10 is a -4% loss inside the default window) in another.
+  const provider = fixtureProvider();
+  provider.itemMap.set(40, item(40, 48));
+  provider.inventories.set(2, inventory(2, [30, 40]));
+  provider.adList = [ad(), ad({ id: 701, offering: [40], requesting: [10] })];
+  const store = new Store(':memory:'); const user = profile(); user.alerts = true; store.save(user);
+  const sent: number[] = [];
+  const monitor = new Monitor(store, new SearchService(provider), async (_id, r) => { sent.push(r.receive[0]!.assetId); });
+  await monitor.tick(); assert.equal(sent.length, 1, 'one alert per scan');
+  await monitor.tick(); assert.equal(sent.length, 2, 'the other item from the same seller follows next scan'); assert.deepEqual([...new Set(sent)].sort(), [30, 40]);
+  await monitor.tick(); assert.equal(sent.length, 2, 'both seller/item pairs are now known for 24 hours');
+  // The hourly ceiling scales with the chosen rate (30 an hour per slot, never under 60); at it, nothing more goes out.
+  const cap = alertHourlyCap(user.preferences.alertsPerScan);
+  assert.equal(cap, 90);
+  const busy = new Store(':memory:'); busy.save(user);
+  for (let i = 0; i < cap; i++) busy.markSent(user.discordId, `earlier-${i}`);
+  let overflow = 0;
+  const capped = new Monitor(busy, new SearchService(provider), async () => { overflow++; });
+  await capped.tick(); assert.equal(overflow, 0, 'the hourly ceiling holds everything back');
+  assert.equal(busy.sentCount(user.discordId, 3_600_000), cap);
+  assert.equal(busy.sentCount(user.discordId, 3_600_000, Date.now() + 3_600_001), 0);
+  await monitor.stop(); await capped.stop(); store.close(); busy.close();
+});
+
+test('the per-check DM rate decides how many sellers one scan alerts about', async () => {
+  // Two sellers, each offering one item the user can trade for; the rate is the only thing limiting the batch.
+  const build = () => {
+    const provider = fixtureProvider();
+    provider.itemMap.set(40, item(40, 48));
+    provider.inventories.set(3, inventory(3, [40]));
+    provider.adList = [ad(), ad({ id: 701, userId: 3, username: 'OtherSeller', offering: [40], requesting: [10] })];
+    return provider;
+  };
+  const user = profile(); user.alerts = true;
+  assert.equal(user.preferences.alertsPerScan, 3, 'the default sends a batch, not a trickle');
+  const store = new Store(':memory:'); store.save(user);
+  const sent: number[] = [];
+  const monitor = new Monitor(store, new SearchService(build()), async (_id, r) => { sent.push(r.ad.userId); });
+  await monitor.tick(); assert.deepEqual(sent.sort(), [2, 3], 'both sellers in one scan');
+  // Turned down to one, the same scan sends a single DM and leaves the rest for later checks.
+  const slow = new Store(':memory:'); const quiet = profile(); quiet.alerts = true; quiet.preferences.alertsPerScan = 1; slow.save(quiet);
+  const trickle: number[] = [];
+  const paced = new Monitor(slow, new SearchService(build()), async (_id, r) => { trickle.push(r.ad.userId); });
+  await paced.tick(); assert.equal(trickle.length, 1);
+  await paced.tick(); assert.equal(trickle.length, 2); assert.deepEqual([...trickle].sort(), [2, 3]);
+  await monitor.stop(); await paced.stop(); store.close(); slow.close();
+});
+
+test('alert batches lead with downgrades, and only send trades that are actually worth sending', async () => {
+  const provider = fixtureProvider();
+  // The user holds a 110 item plus two 50s. One seller splits the 110 into two 60s (+9% downgrade); another
+  // consolidates the two 50s into a 90 (a 10% overpay, the upgrade). A third offers a lone 55, which is a 1-for-1
+  // nobody asked for and an absurd overpay any other way, so it is worth nothing to either side.
+  provider.inventories.set(1, inventory(1, [30, 10, 20]));
+  for (const [id, value] of [[60, 60], [61, 60], [70, 90], [80, 55]] as const) provider.itemMap.set(id, item(id, value));
+  provider.inventories.set(2, inventory(2, [60, 61]));
+  provider.inventories.set(3, inventory(3, [70]));
+  provider.inventories.set(4, inventory(4, [80]));
+  provider.adList = [
+    ad({ id: 900, userId: 2, offering: [60, 61], requesting: [] }),
+    ad({ id: 901, userId: 3, offering: [70], requesting: [] }),
+    ad({ id: 902, userId: 4, offering: [80], requesting: [] }),
+  ];
+  const store = new Store(':memory:'); const user = profile(); user.alerts = true; store.save(user);
+  const sent: string[] = [];
+  const monitor = new Monitor(store, new SearchService(provider), async (_id, r) => { sent.push(`${r.give.length}v${r.receive.length} ${r.mode}`); });
+  await monitor.tick();
+  assert.deepEqual(sent, ['1v2 downgrade', '2v1 upgrade'], 'the downgrade leads the batch and the pointless offer never appears');
+  await monitor.stop(); store.close();
+});
+
+test('the ad archive is a rolling window: past the retention span or the row cap, the oldest go first', () => {
+  const store = new Store(':memory:', { hours: 2, maxAds: 5 });
+  const now = Date.now();
+  const at = (id: number, minutesAgo: number) => ({ ...ad({ id }), createdAt: now - minutesAgo * 60_000 });
+  store.saveAds([at(1, 200), at(2, 190), ...Array.from({ length: 8 }, (_, i) => at(10 + i, i))]);
+  assert.equal(store.adCount(), 10);
+  store.prune(now);
+  // The two beyond the two-hour window are gone, and the cap keeps only the five newest of what is left.
+  assert.equal(store.adCount(), 5);
+  const kept = store.recentAds(2 * 3_600_000, now).map(a => a.id).sort((x, y) => x - y);
+  assert.deepEqual(kept, [10, 11, 12, 13, 14], 'the newest survive and the oldest are displaced');
+  // A search never reaches past the retention window, whatever age filter it asks for.
+  assert.equal(store.recentAds(48 * 3_600_000, now).length, 5);
+  const stats = store.stats(now);
+  assert.equal(stats.count, 5); assert.equal(stats.maxAds, 5); assert.equal(stats.retentionHours, 2);
+  assert.ok(stats.bytes > 0, 'the panels report the size the archive takes on disk');
+  store.close();
 });
