@@ -51,6 +51,33 @@ export class HttpClient {
     }
     throw new UserError('Request failed.');
   }
+  /** HTML page download. Uses the same host spacing and retry-after handling as JSON requests. */
+  async text(url: string, maxBytes = 4_000_000): Promise<string> {
+    const host = new URL(url).host;
+    await this.slot(host);
+    let response: Response;
+    try {
+      response = await this.fetcher(url, { signal: AbortSignal.timeout(20_000), headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36 Tradefinder/1.0',
+        Accept: 'text/html,application/xhtml+xml' } });
+    } catch { throw new UserError(`${host} could not be reached. Try again shortly.`); }
+    if (response.status === 429 || response.status >= 500) { this.blockedUntil.set(host, Date.now() + 60_000); throw new UserError(`${host} is busy or rate limited. Try again later.`); }
+    if (!response.ok) throw new UserError(`${host} returned HTTP ${response.status}.`);
+    const body = await response.text();
+    if (body.length > maxBytes) throw new UserError(`${host} returned an unexpectedly large page.`);
+    return body;
+  }
+  /** Small binary download (thumbnails). Decoration only: any failure returns null instead of throwing. */
+  async bytes(url: string, maxBytes = 2_000_000): Promise<Buffer | null> {
+    const host = new URL(url).host;
+    try {
+      await this.slot(host);
+      const response = await this.fetcher(url, { signal: AbortSignal.timeout(12_000), headers: { 'User-Agent': 'Tradefinder/1.0' } });
+      if (!response.ok) return null;
+      const data = Buffer.from(await response.arrayBuffer());
+      return data.length > maxBytes ? null : data;
+    } catch { return null; }
+  }
 }
 
 /** Bounded cache with in-flight request sharing; errors and stale data are never cached. */

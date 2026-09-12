@@ -8,9 +8,10 @@ import { defaults, type Inventory, type Item, type TradeAd, type UserProfile } f
 import { Providers, type DataProvider } from '../src/providers.js';
 import { SearchService } from '../src/search.js';
 import { evaluate, priced, selectCopies } from '../src/engine.js';
+import { groupInventory } from '../src/inventory.js';
 import {
-  alertsMessage, analysisMessage, calcMessage, errorMessage, helpMessage, inventoryMessage, linkMessage, recommendationMessage,
-  searchMessage, settingsMessage, statusMessage,
+  alertsMessage, errorMessage, helpMessage, inventoryMessage, linkMessage, recommendationMessage,
+  profitMessage, searchMessage, settingsMessage,
 } from '../src/presentation.js';
 
 const item = (id: number, name: string, acronym: string, value: number | null, rap: number, extra: Partial<Item> = {}): Item =>
@@ -31,7 +32,7 @@ const provider: DataProvider = {
   async inventory(id) { return id === 1 ? inventory(1, [1029025, 1031429, 21070012, 1235488]) : inventory(2, [1365767, 16630147]); },
   async user(input) { return { id: Number(input) || 2, name: 'LimitedFlipper' }; },
 };
-const user: UserProfile = { discordId: '1', robloxId: 1, username: 'AsherTrades', preferences: { ...defaults(), mode: 'upgrade', targetIds: [1365767, 16630147], lockedIds: [21070012] }, alerts: true, alertError: null };
+const user: UserProfile = { discordId: '1', robloxId: 1, username: 'AsherTrades', preferences: { ...defaults(), mode: 'upgrade', targetIds: [1365767, 16630147] }, alerts: true, alertError: null, inventoryAlerts: true };
 
 // Real avatars make the mock faithful; fall back to a generated placeholder when offline.
 const placeholder = (label: string, color: string) => `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150"><rect width="150" height="150" rx="16" fill="${color}"/><text x="75" y="95" font-family="sans-serif" font-size="64" font-weight="700" fill="#fff" text-anchor="middle">${label}</text></svg>`)}`;
@@ -43,14 +44,12 @@ const own = priced(await provider.inventory(1), items), theirs = priced(await pr
 const failing = evaluate(selectCopies([1029025], own)!, selectCopies([16630147], theirs)!, user.preferences);
 const panels: Record<string, { embeds: { toJSON(): APIEmbed }[]; components: { toJSON(): APIActionRowComponent<APIComponentInMessageActionRow> }[]; files?: unknown[] }> = {
   help: helpMessage(),
-  calc: calcMessage(),
   link: linkMessage({ id: 1, name: 'AsherTrades' }, 4, ownAvatar),
-  settings: settingsMessage(user, items, '✅ Filters updated.'),
-  status: statusMessage(user, items, ownAvatar),
-  inventory: { ...inventoryMessage(user, { copies: 4, available: own.filter(c => c.assetId !== 21070012), value: 391_000, rap: 381_600 }, ownAvatar), files: [1] },
-  search: searchMessage(result, { mode: 'upgrade', targetId: 1365767, results: 3 }, 'Valkyrie Helm'),
+  profit: profitMessage(user, items, '✅ Profit filters updated.'),
+  settings: settingsMessage(user, items, ownAvatar),
+  inventory: { ...inventoryMessage(user, { view: 'text', page: 0, pages: 1, entries: groupInventory(inventory(1, [1029025, 1031429, 21070012, 1235488]), items), total: 4, copies: 4, value: 391_000, rap: 381_600 }, ownAvatar), files: [1] },
+  search: searchMessage(result, { mode: 'upgrade', targetIds: [1365767], results: 3 }, items),
   recommendation: recommendationMessage(rec, { alert: true, avatar: partnerAvatar }),
-  analyze: analysisMessage(failing, { id: 2, name: 'LimitedFlipper' }, partnerAvatar),
   alerts: alertsMessage(user),
   error: { embeds: [...(errorMessage('Please wait 12 more seconds between searches or analyses.').embeds as { toJSON(): APIEmbed }[])], components: [] },
 };

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { HttpClient, Cache } from '../src/http.js';
-import { parseAds, parseItems, Providers, resolveItem } from '../src/providers.js';
+import { AmbiguousItemError, extractSiteAds, parseAds, parseItems, Providers, resolveItem } from '../src/providers.js';
 import { fixtureProvider } from './fixtures.js';
 
 function http(responses: { status?: number; body: unknown; headers?: Record<string, string> }[]) {
@@ -51,7 +51,7 @@ test('cache coalesces concurrent loads and never caches failed requests', async 
 test('resolves item IDs and acronyms while reporting ambiguous searches', () => {
   const items = fixtureProvider().itemMap;
   assert.equal(resolveItem('I10', items).id, 10); assert.equal(resolveItem('30', items).id, 30);
-  assert.throws(() => resolveItem('Item', items), /Several/); assert.throws(() => resolveItem('missing', items), /No supported/);
+  assert.throws(() => resolveItem('Item', items), /Several/); assert.throws(() => resolveItem('missing', items), /No Rolimons-tracked/);
 });
 
 test('avatar lookup returns the CDN headshot only when completed and https; failures degrade to null', async () => {
@@ -60,4 +60,48 @@ test('avatar lookup returns the CDN headshot only when completed and https; fail
   assert.equal(await new Providers(http([{ body: { data: [{ targetId: 156, state: 'Pending', imageUrl: '' }] } }]).client).avatar(156), null);
   assert.equal(await new Providers(http([{ body: { data: [{ targetId: 156, state: 'Completed', imageUrl: 'http://insecure.example/x.png' }] } }]).client).avatar(156), null);
   assert.equal(await new Providers(http([{ body: { unexpected: true } }]).client).avatar(156), null);
+});
+
+test('trades page extraction reads the embedded ad array past nested brackets and bracketed strings', () => {
+  const ads = [[94470531, 1789078344, 7636073273, 'Sigma]Holder[', { items: [21416138, 102887469225690] }, { tags: [3, 4, 5, 6] }],
+    [94470530, 1789078300, 41377756, 'kp"b5', { items: [16477149823] }, { items: [1048037], tags: [3] }]];
+  const html = `<html><script>var trade_ads_note = "use the API [please]"; var s = [1];\nvar trade_ads = ${JSON.stringify(ads)};\nvar other = [[2]];</script></html>`;
+  const parsed = extractSiteAds(html) as { success: boolean; trade_ads: unknown[] };
+  assert.equal(parsed.success, true); assert.deepEqual(parsed.trade_ads, ads);
+  assert.throws(() => extractSiteAds('<html>nothing here</html>'), /layout changed/);
+  assert.throws(() => extractSiteAds('var trade_ads = [[1, 2'), /truncated/);
+});
+
+test('a refused trades page backs off for 30 minutes while the API keeps feeding ads', async () => {
+  const apiAds = { success: true, trade_ads: [[700, Math.floor(Date.now() / 1000), 2, 'Seller', { items: [30] }, { items: [10] }]] };
+  let pageHits = 0;
+  const fetcher = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('rolimons.com/trades')) { pageHits++; return new Response('forbidden', { status: 403 }); }
+    return new Response(JSON.stringify(apiAds), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+  const provider = new Providers(new HttpClient(fetcher, 0));
+  assert.equal((await provider.ads()).data.length, 1); assert.equal(pageHits, 1);
+  await assert.rejects(provider.siteAds(), /HTTP 403/).catch(() => undefined);
+  assert.deepEqual(await provider.siteAds(), []); assert.equal(pageHits, 1, 'no retry while backed off');
+});
+
+test('items resolve from full names ignoring punctuation, acronyms, IDs and pasted URLs; partial names become pick lists', () => {
+  const items = new Map([
+    [1235488, { ...fixtureProvider().itemMap.get(10)!, id: 1235488, name: "Clockwork's Headphones", acronym: 'CWHP' }],
+    [1172161, { ...fixtureProvider().itemMap.get(10)!, id: 1172161, name: 'The Bluesteel Bathelm', acronym: 'BBH' }],
+    [1, { ...fixtureProvider().itemMap.get(10)!, id: 1, name: 'Red Sparkle Time Fedora', acronym: 'RSTF', value: 100 }],
+    [2, { ...fixtureProvider().itemMap.get(10)!, id: 2, name: 'Sparkle Time Fedora', acronym: 'STF', value: 200 }],
+  ]);
+  assert.equal(resolveItem('clockworks headphones', items).id, 1235488);
+  assert.equal(resolveItem('Clockwork’s Headphones', items).id, 1235488);
+  assert.equal(resolveItem('blue steel bathelm', items).id, 1172161);
+  assert.equal(resolveItem('cwhp', items).id, 1235488);
+  assert.equal(resolveItem('https://www.rolimons.com/item/1172161', items).id, 1172161);
+  assert.equal(resolveItem('https://www.roblox.com/catalog/1235488/Clockworks-Headphones', items).id, 1235488);
+  assert.equal(resolveItem('sparkle time fedora', items).id, 2, 'an exact name beats a longer name containing it');
+  assert.throws(() => resolveItem('fedora', items), (error: unknown) => error instanceof AmbiguousItemError && error.matches.map(i => i.id).join() === '2,1');
+  assert.throws(() => resolveItem('rst', items), (error: unknown) => error instanceof AmbiguousItemError && error.matches.length === 1, 'partial acronym only suggests');
+  assert.throws(() => resolveItem('https://www.rolimons.com/item/999', items), /not a Rolimons-tracked/);
+  assert.throws(() => resolveItem('   ', items), /Enter an item/);
 });

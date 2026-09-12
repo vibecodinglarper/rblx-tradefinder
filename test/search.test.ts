@@ -8,6 +8,7 @@ import { ad, fixtureProvider, inventory, profile } from './fixtures.js';
 test('end-to-end search verifies both inventories and deduplicates reposted recommendations', async () => {
   const provider = fixtureProvider(); provider.adList.push(ad({ id: 701 }));
   const result = await new SearchService(provider).search(profile());
+  // The ad asks for 10+20, so single-item offers (+120%) are past the realistic band and dropped; only the advertised exchange remains.
   assert.equal(result.recommendations.length, 1); assert.equal(result.recommendations[0]?.match, 'exact');
   assert.deepEqual(provider.calls, [1, 2]);
   assert.equal(result.recommendations[0]?.give[0]?.userAssetId, 100);
@@ -46,4 +47,25 @@ test('serializes a user search and releases the lock after errors', async () => 
   const service = new SearchService(provider), first = service.search(profile());
   await assert.rejects(service.search(profile()), /already running/);
   release(); await first; await service.search(profile());
+});
+
+test('searches screen archived ads beyond the live feed, deduplicate by ID, and report how far back they reached', async () => {
+  const { Store } = await import('../src/store.js');
+  const store = new Store(':memory:');
+  const provider = fixtureProvider();
+  // The live feed only has the current ad; a 20-minute-old ad from the same seller lives only in the archive.
+  const old = ad({ id: 650, createdAt: Date.now() - 20 * 60_000, offering: [30], requesting: [10] });
+  assert.equal(store.saveAds([old, old]), 1);
+  const service = new SearchService(provider, 12, store);
+  const result = await service.search(profile());
+  assert.equal(result.adsScanned, 2); assert.ok(result.coverageMinutes >= 20);
+  assert.equal(store.recentAds(3_600_000).length, 2, 'the live ad was archived by the search');
+  // Ads outside the user's max ad age are ignored, and the archive is pruned after 24 hours.
+  const user = profile(); user.preferences.maxAdAgeMinutes = 5;
+  assert.equal((await new SearchService(provider, 12, store).search(user)).adsScanned, 1);
+  store.saveAds([ad({ id: 1, createdAt: Date.now() - 25 * 3_600_000 })]); store.prune();
+  assert.equal(store.adCount(), 2);
+  const coverage = service.coverage()!; assert.equal(coverage.count, 2); assert.ok(coverage.minutes >= 20 && coverage.minutes <= 21);
+  assert.equal(new SearchService(provider).coverage(), undefined);
+  store.close();
 });
