@@ -1,4 +1,4 @@
-import { effectiveValue, type Inventory, type Item } from './domain.js';
+import { effectiveValue, visibleHoldings, type Inventory, type Item } from './domain.js';
 
 /** One catalog item in an inventory, with every owned copy folded into a quantity. */
 export interface InventoryEntry {
@@ -11,10 +11,11 @@ export interface InventoryEntry {
 export type InventoryView = 'grid' | 'text';
 export const PAGE_SIZE: Record<InventoryView, number> = { grid: 12, text: 20 };
 
+/** Permanently untradable copies are left out; a copy on hold is shown, since it will be tradable again. */
 export function groupInventory(inventory: Inventory, items: Map<number, Item>): InventoryEntry[] {
   const groups = new Map<string, InventoryEntry>();
   const availability = new Map<InventoryEntry, { tradable: number; unknown: number }>();
-  for (const h of inventory.holdings) {
+  for (const h of visibleHoldings(inventory.holdings)) {
     const key = h.itemTarget ? `${h.itemTarget.itemType}:${h.itemTarget.targetId}` : `Asset:${h.assetId}`;
     let entry = groups.get(key);
     if (!entry) {
@@ -37,10 +38,12 @@ export function groupInventory(inventory: Inventory, items: Map<number, Item>): 
   const entries = [...groups.values()];
   for (const e of entries) {
     const status = availability.get(e)!;
-    // Status goes first so it remains visible even when a card has several other tags.
-    e.tags.unshift(status.unknown ? 'Tradability unknown' : status.tradable === e.quantity ? 'Tradable'
-      : status.tradable === 0 ? 'Not tradable' : `${status.tradable}/${e.quantity} tradable`);
-    if (e.onHold) e.tags.push(e.onHold === e.quantity ? 'on hold' : `${e.onHold} on hold`);
+    // Status goes first so it remains visible even when a card has several other tags. With untradable copies gone,
+    // a verified entry with nothing tradable is one whose every copy is on hold.
+    const label = status.unknown ? 'Tradability unknown' : status.tradable === e.quantity ? 'Tradable'
+      : status.tradable === 0 ? 'on hold' : `${status.tradable}/${e.quantity} tradable`;
+    e.tags.unshift(label);
+    if (e.onHold && label !== 'on hold') e.tags.push(e.onHold === e.quantity ? 'on hold' : `${e.onHold} on hold`);
   }
   // Most valuable first; unpriced items last, then by name so the order is stable between pages.
   return entries.sort((a, b) => (b.value ?? -1) - (a.value ?? -1) || a.name.localeCompare(b.name));

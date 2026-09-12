@@ -2,7 +2,7 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, escapeMarkdown, ModalBuilder, StringSelectMenuBuilder,
   TextInputBuilder, TextInputStyle, type BaseMessageOptions,
 } from 'discord.js';
-import { alertHourlyCap, defaults as defaultPreferences, effectiveValue, idSchema, modeSchema, UserError, type Item, type Mode, type Preferences, type UserProfile } from './domain.js';
+import { alertHourlyCap, defaults as defaultPreferences, effectiveValue, idSchema, modeSchema, tradabilityTag, UserError, type Item, type Mode, type Preferences, type UserProfile } from './domain.js';
 import { downgradeWindow, upgradeWindow, type Evaluation, type PricedCopy, type Recommendation } from './engine.js';
 import type { ArchiveStats, SearchResult } from './search.js';
 import { formatRange, formatMixedRange, mixedRangeText, type Range } from './amounts.js';
@@ -97,7 +97,7 @@ const navButtons = nav;
 
 // ---------- Trade rendering ----------
 function itemLine(c: PricedCopy): string {
-  const flags = [c.item.projected && '📈 projected', c.item.hyped && '🔥 hyped', c.item.rare && '💎 rare'].filter(Boolean).join(' · ');
+  const flags = [tagLabel(tradabilityTag(c)), c.item.projected && '📈 projected', c.item.hyped && '🔥 hyped', c.item.rare && '💎 rare'].filter(Boolean).join(' · ');
   return `**[${escapeMarkdown(clip(c.item.name, 60))}](${links.item(c.assetId)})**\n`
     + `\`V ${number(effectiveValue(c.item))}${c.item.value === null ? ' (= RAP)' : ''}\` \`RAP ${number(c.item.rap)}\` · ${demandLabel(c.item.demand)} demand\n`
     + `ID ${c.assetId} · Copy ${c.userAssetId}${flags ? ` · ${flags}` : ''}`;
@@ -226,7 +226,8 @@ export function alertMessage(r: Recommendation, options: { card?: boolean; chara
     .setDescription(`**${escapeMarkdown(clip(r.ad.username, 20))}** · [Profile](${links.profile(r.ad.userId)}) · [Rolimons](${links.player(r.ad.userId)}) · ad ${time(r.ad.createdAt)}\n🔁 [Open the trade window with ${escapeMarkdown(clip(r.ad.username, 20))}](${tradeUrl(r)})`)
     .setTimestamp(r.ad.createdAt);
   if (options.card) embed.setImage('attachment://trade-1.png');
-  else embed.addFields({ name: '📤 You give', value: names(r.give) || '—', inline: true }, { name: '📥 You get', value: names(r.receive) || '—', inline: true });
+  else embed.addFields({ name: '📤 You give', value: side(r.give), inline: true }, { name: '📥 You get', value: side(r.receive), inline: true });
+  embed.addFields({ name: '🕒 Tradability checked', value: `Your items ${time(r.ownInventoryAt)} · Their items ${time(r.partnerInventoryAt)}` });
   return message(embed,
     row(link(clip(`Trade with ${r.ad.username}`, 80), tradeUrl(r), '🔁')),
     row(button(ids.build('alerts', 'off'), 'Stop alerts', ButtonStyle.Danger, '🔕')));
@@ -538,9 +539,13 @@ export function inventoryAlertsMessage(user: UserProfile, copies?: number) {
   return message(embed, row(nav.inventoryAlerts(user.inventoryAlerts), nav.inventory()));
 }
 const changeLine = (copies: PricedCopy[]) => {
-  const counts = new Map<number, { id: number; name: string; n: number; value: number }>();
-  for (const c of copies) { const e = counts.get(c.assetId); if (e) e.n++; else counts.set(c.assetId, { id: c.assetId, name: c.item.name, n: 1, value: effectiveValue(c.item) }); }
-  return [...counts.values()].map(e => `[${escapeMarkdown(clip(e.name, 40))}](${links.item(e.id)})${e.n > 1 ? ` **×${e.n}**` : ''} · ${e.value > 0 ? `${statIcons.value} ${number(e.value)}` : 'no price'}`).join('\n').slice(0, 1024) || '—';
+  const counts = new Map<string, { id: number; name: string; n: number; value: number; status: string }>();
+  for (const c of copies) {
+    const status = tradabilityTag(c), key = `${c.itemTarget?.itemType ?? 'Asset'}:${c.itemTarget?.targetId ?? c.assetId}:${status}`;
+    const e = counts.get(key); if (e) e.n++;
+    else counts.set(key, { id: c.assetId, name: c.item.name, n: 1, value: effectiveValue(c.item), status });
+  }
+  return [...counts.values()].map(e => `[${escapeMarkdown(clip(e.name, 40))}](${links.item(e.id)})${e.n > 1 ? ` **×${e.n}**` : ''} · ${e.value > 0 ? `${statIcons.value} ${number(e.value)}` : 'no price'} · ${tagLabel(e.status)}`).join('\n').slice(0, 1024) || '—';
 };
 /**
  * DM sent when the monitor notices copies leaving or joining the inventory. `card` says whether a rendered
@@ -575,7 +580,7 @@ export function linkMessage(roblox: { id: number; name: string }, copies: number
   return message(embed, row(nav.find(), nav.inventory(), link('Rolimons', links.player(roblox.id), '📈')));
 }
 export interface InventoryPage { view: InventoryView; page: number; pages: number; entries: InventoryEntry[]; total: number; copies: number; value: number; rap: number; note?: string }
-const TAG_EMOJI: Record<string, string> = { Tradable: '✅', 'Not tradable': '🚫', 'Tradability unknown': '❔', rare: '💎', projected: '📈', hyped: '🔥', unpriced: '❔', 'on hold': '⏳' };
+const TAG_EMOJI: Record<string, string> = { Tradable: '✅', 'On hold': '⏳', 'Not tradable': '🚫', 'Tradability unknown': '❔', rare: '💎', projected: '📈', hyped: '🔥', unpriced: '❔', 'on hold': '⏳' };
 const tagLabel = (tag: string) => `${TAG_EMOJI[tag] ?? (/^\d+\/\d+ tradable$/.test(tag) ? '✅' : TAG_EMOJI['on hold'])} ${tag}`;
 /** Paged inventory: a rendered grid of item squares (attached as inventory.png) or a plain text list, with a toggle between them. */
 export function inventoryMessage(user: UserProfile, inv: InventoryPage, avatar?: Avatar) {

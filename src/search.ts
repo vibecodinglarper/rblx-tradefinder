@@ -1,5 +1,5 @@
-import { effectiveValue, UserError, type Inventory, type Preferences, type UserProfile, type TradeAd } from './domain.js';
-import { affordableRange, outgoingBundles, priced, propose, REALISTIC_GAIN_PCT, recommendationKey, shapeDistance, sizeBand, type Evaluation, type Recommendation } from './engine.js';
+import { effectiveValue, UserError, type Holding, type Inventory, type Preferences, type UserProfile, type TradeAd } from './domain.js';
+import { affordableRange, evaluate, outgoingBundles, priced, propose, REALISTIC_GAIN_PCT, recommendationKey, sameAssets, shapeDistance, sizeBand, type Evaluation, type Recommendation, type PricedCopy } from './engine.js';
 
 export interface SearchOptions {
   /** Only offer copies of this item (downgrade mode: one item given for several received). */
@@ -37,6 +37,35 @@ export class SearchService {
   constructor(readonly provider: DataProvider, private maxSellers = 12, readonly archive?: AdArchive) {}
   /** Archive size and reach, for status panels. Absent when no archive is attached. */
   coverage(): ArchiveStats | undefined { return this.archive?.stats?.() ?? this.archive?.adCoverage(); }
+  /** A saved recommendation is only a candidate. Refresh quantities, targets and prices before delivering it. */
+  async refresh(user: UserProfile, recommendation: Recommendation): Promise<Recommendation | null> {
+    const [own, partner, items] = await Promise.all([
+      this.provider.inventory(user.robloxId, 0, user),
+      this.provider.inventory(recommendation.ad.userId, 0, user), this.provider.items(),
+    ]);
+    if (own.tradabilityError || partner.tradabilityError) throw new UserError(own.tradabilityError ?? partner.tradabilityError!);
+    if ([own.fetchedAt, partner.fetchedAt, items.fetchedAt].some(at => Date.now() - at > 300_000))
+      throw new UserError('Inventory verification became stale. The alert was not sent.');
+    if (Date.now() - recommendation.ad.createdAt > user.preferences.maxAdAgeMinutes * 60_000) return null;
+    const key = (c: Holding) => `${c.itemTarget?.itemType ?? 'Asset'}:${c.itemTarget?.targetId ?? c.assetId}`;
+    const select = (wanted: Holding[], available: PricedCopy[]) => {
+      const used = new Set<number | string>();
+      const selected: PricedCopy[] = [];
+      for (const expected of wanted) {
+        const copy = available.find(c => c.assetId === expected.assetId && key(c) === key(expected) && !used.has(c.userAssetId));
+        if (!copy) return null;
+        used.add(copy.userAssetId); selected.push(copy);
+      }
+      return selected;
+    };
+    const give = select(recommendation.give, priced(own, items.data));
+    const receive = select(recommendation.receive, priced(partner, items.data));
+    if (!give || !receive) return null;
+    const advertised = recommendation.ad.requesting.length > 0 && sameAssets(give, recommendation.ad.requesting);
+    const evaluation = evaluate(give, receive, user.preferences, advertised);
+    if (!evaluation.passes) return null;
+    return { ...recommendation, ...evaluation, ownInventoryAt: own.fetchedAt, partnerInventoryAt: partner.fetchedAt, pricesAt: items.fetchedAt };
+  }
   async search(user: UserProfile, preferences: Preferences = user.preferences, options: SearchOptions = {}): Promise<SearchResult> {
     if (this.active.has(user.discordId)) throw new UserError('A search is already running for you. Please wait for it to finish.');
     this.active.add(user.discordId);

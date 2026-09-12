@@ -2,7 +2,7 @@ import {
   AttachmentBuilder, MessageFlags, type AutocompleteInteraction, type ChatInputCommandInteraction,
   type MessageComponentInteraction, type ModalBuilder, type ModalSubmitInteraction,
 } from 'discord.js';
-import { effectiveValue, NotLinkedError, parseId, parsePreferences, UserError, type Item, type UserProfile } from './domain.js';
+import { effectiveValue, NotLinkedError, parseId, parsePreferences, UserError, visibleHoldings, type Item, type UserProfile } from './domain.js';
 import { affordableRange, evaluate, priced, REALISTIC_GAIN_PCT, selectCopies, totals, type Recommendation } from './engine.js';
 import { groupInventory, paginate, PAGE_SIZE, type InventoryView } from './inventory.js';
 import { renderInventoryGrid, renderTradeCard } from './render.js';
@@ -433,7 +433,7 @@ export class Bot {
       if (missed.length) notes.push(`⚠️ Not recognised as wanted items: ${missed.join(', ')} — add them later from **Wanted items**.`);
       this.store.save(user);
     }
-    return linkMessage(roblox, inventory.holdings.length, await this.avatar(roblox.id), notes.join('\n'));
+    return linkMessage(roblox, visibleHoldings(inventory.holdings).length, await this.avatar(roblox.id), notes.join('\n'));
   }
   /** The alerts panel, with the real check interval and when the last DM went out. */
   private alerts(user: UserProfile, note?: string) {
@@ -446,7 +446,11 @@ export class Bot {
   /** Turning inventory DMs on records the current inventory as the baseline, so only changes from now on are reported. */
   private async setInventoryAlerts(user: UserProfile, enabled: boolean) {
     let copies: number | undefined;
-    if (enabled) { const inventory = await this.search.provider.inventory(user.robloxId); this.store.saveSnapshot(user.discordId, inventory.holdings, inventory.fetchedAt); copies = inventory.holdings.length; }
+    if (enabled) {
+      const inventory = await this.search.provider.inventory(user.robloxId, 0, user);
+      if (inventory.tradabilityError) throw new UserError(inventory.tradabilityError);
+      this.store.saveSnapshot(user.discordId, inventory.holdings, inventory.fetchedAt, true); copies = visibleHoldings(inventory.holdings).length;
+    }
     else this.store.clearSnapshot(user.discordId);
     user.inventoryAlerts = enabled; this.store.save(user);
     return inventoryAlertsMessage(user, copies);
@@ -462,7 +466,8 @@ export class Bot {
       const thumbnails = await this.search.provider.thumbnails?.(paged.items.map(e => e.assetId)).catch(() => new Map<number, Buffer>()) ?? new Map<number, Buffer>();
       files.push(new AttachmentBuilder(await renderInventoryGrid(paged.items, thumbnails), { name: 'inventory.png' }));
     }
-    const message = inventoryMessage(user, { view, ...paged, entries: paged.items, total: entries.length, copies: inventory.holdings.length, value: total.value, rap: total.rap, note: inventory.tradabilityError }, await this.avatar(user.robloxId));
+    const copies = entries.reduce((n, e) => n + e.quantity, 0);
+    const message = inventoryMessage(user, { view, ...paged, entries: paged.items, total: entries.length, copies, value: total.value, rap: total.rap, note: inventory.tradabilityError }, await this.avatar(user.robloxId));
     return { ...message, files };
   }
   private cooldown(discordId: string): void {
@@ -529,7 +534,7 @@ export class Bot {
     this.cooldown(user.discordId);
     const partner = await this.search.provider.user(partnerInput);
     if (partner.id === user.robloxId) throw new UserError('Choose a different trade partner.');
-    const [own, theirs, items] = await Promise.all([this.search.provider.inventory(user.robloxId, undefined, user), this.search.provider.inventory(partner.id, undefined, user), this.search.provider.items()]);
+    const [own, theirs, items] = await Promise.all([this.search.provider.inventory(user.robloxId, 0, user), this.search.provider.inventory(partner.id, 0, user), this.search.provider.items()]);
     if (own.tradabilityError || theirs.tradabilityError) throw new UserError(own.tradabilityError ?? theirs.tradabilityError!);
     if ([own.fetchedAt, theirs.fetchedAt, items.fetchedAt].some(at => Date.now() - at > 300_000))
       throw new UserError('An inventory or price snapshot became stale during analysis. Please retry.');

@@ -107,6 +107,16 @@ export interface Holding {
   unmappedBundle?: boolean;
 }
 export interface Inventory { userId: number; holdings: Holding[]; fetchedAt: number; tradabilityError?: string }
+export type TradabilityTag = 'Tradable' | 'On hold' | 'Not tradable' | 'Tradability unknown';
+export const tradabilityTag = (holding: Holding): TradabilityTag =>
+  holding.tradable === undefined ? 'Tradability unknown' : holding.onHold ? 'On hold' : holding.tradable ? 'Tradable' : 'Not tradable';
+/**
+ * A verified copy that can never be traded (a retained classic face, a stale public row): unlike a copy on hold, it
+ * has no trading future, so inventories, change recaps and trade proposals leave it out entirely.
+ */
+export const permanentlyUntradable = (holding: Holding): boolean => holding.tradable === false && !holding.onHold;
+/** The copies worth showing: everything except what is permanently untradable. */
+export const visibleHoldings = (holdings: Holding[]): Holding[] => holdings.filter(h => !permanentlyUntradable(h));
 export interface TradeAd {
   id: number; createdAt: number; userId: number; username: string;
   offering: number[]; requesting: number[]; tags: number[]; offeringRobux: number; requestingRobux: number;

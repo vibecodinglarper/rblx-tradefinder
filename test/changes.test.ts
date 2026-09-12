@@ -73,7 +73,7 @@ test('store persists the inventory-DM flag and snapshots, migrates old databases
     store.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
-test('monitor takes a baseline first, DMs each change once, retries a failed DM with the same diff, and skips an empty inventory', async () => {
+test('monitor takes a baseline first, DMs each verified change once, retries failures and handles a verified empty inventory', async () => {
   const store = new Store(':memory:'); const user = profile(); user.inventoryAlerts = true; store.save(user);
   const provider = fixtureProvider(); const sent: { kind: string; valueGain: number }[] = []; let fail = false;
   const monitor = new Monitor(store, new SearchService(provider), async () => {}, 1000, async (_u, change) => { if (fail) throw new Error('transient'); sent.push({ kind: change.kind, valueGain: change.valueGain }); });
@@ -84,14 +84,73 @@ test('monitor takes a baseline first, DMs each change once, retries a failed DM 
   fail = true; await monitor.tick(); assert.equal(sent.length, 0); assert.match(store.get(user.discordId)?.alertError ?? '', /Inventory check failed/);
   fail = false; await monitor.tick(); assert.deepEqual(sent, [{ kind: 'trade', valueGain: 60 }]);
   await monitor.tick(); assert.equal(sent.length, 1);
-  provider.inventories.set(1, inventory(1, [])); await monitor.tick(); assert.equal(sent.length, 1); assert.match(store.get(user.discordId)?.alertError ?? '', /came back empty/);
-  assert.equal(store.snapshot(user.discordId)?.holdings.length, 2);
+  provider.inventories.set(1, inventory(1, [])); await monitor.tick(); assert.equal(sent.length, 2);
+  assert.equal(sent[1]!.kind, 'out');
+  assert.equal(store.snapshot(user.discordId)?.holdings.length, 0);
   // Blocked DMs switch the feature off; a user who turned it off mid-scan is not told anything.
   const blocked = new Monitor(store, new SearchService(provider), async () => {}, 1000, async () => { throw Object.assign(new Error('blocked'), { code: 50007 }); });
   provider.inventories.set(1, inventory(1, [10, 20, 30])); await blocked.tick();
   assert.equal(store.get(user.discordId)?.inventoryAlerts, false); assert.match(store.get(user.discordId)?.alertError ?? '', /DMs are blocked/);
-  await monitor.tick(); assert.equal(sent.length, 1);
+  await monitor.tick(); assert.equal(sent.length, 2);
   await monitor.stop(); await blocked.stop(); store.close();
+});
+
+test('inventory DMs rebaseline legacy snapshots, track bundle UUIDs and preserve snapshots when verification fails', async () => {
+  const store = new Store(':memory:'), user = profile(); user.inventoryAlerts = true; store.save(user);
+  const provider = fixtureProvider(), original = provider.inventory.bind(provider);
+  store.saveSnapshot(user.discordId, inventory(1, [10]).holdings, 1);
+  provider.inventory = async (id, age, viewer) => {
+    assert.equal(age, 0); assert.equal(viewer?.discordId, user.discordId);
+    return original(id);
+  };
+  const bundle = { assetId: 10, userAssetId: 'bundle', collectibleItemInstanceId: 'bundle',
+    itemTarget: { itemType: 'Bundle' as const, targetId: '999' }, onHold: false, tradable: true };
+  provider.inventories.set(1, { ...inventory(1, [10]), holdings: [bundle] });
+  let sent = 0;
+  const monitor = new Monitor(store, new SearchService(provider), async () => {}, 1000, async (_user, change) => {
+    sent++; assert.equal(change.removed[0]!.tradable, false);
+    const text = JSON.stringify(inventoryChangeMessage(user, change).embeds[0]!.toJSON());
+    assert.match(text, /Not tradable/);
+  });
+  try {
+    await monitor.tick(); assert.equal(sent, 0); assert.equal(store.snapshot(user.discordId)?.verified, true);
+    const saved = store.snapshot(user.discordId);
+    provider.inventories.set(1, { ...inventory(1, []), tradabilityError: 'Verification failed.' });
+    await monitor.tick(); assert.equal(sent, 0); assert.deepEqual(store.snapshot(user.discordId), saved);
+    provider.inventories.set(1, inventory(1, []));
+    await monitor.tick(); assert.equal(sent, 1);
+  } finally { await monitor.stop(); store.close(); }
+});
+
+test('a different authenticated copy is detected even when the legacy public row stays stale', () => {
+  const old = { ...inventory(1, [10]).holdings[0]!, collectibleItemInstanceId: 'sold' };
+  const current = { ...old, collectibleItemInstanceId: 'bought' };
+  const change = diffInventory([old], [current], items)!;
+  assert.equal(change.removed[0]!.collectibleItemInstanceId, 'sold');
+  assert.equal(change.added[0]!.collectibleItemInstanceId, 'bought');
+  // A copy that left keeps the status it had when last seen.
+  assert.equal(change.removed[0]!.tradable, true);
+  assert.equal(change.added[0]!.tradable, true);
+});
+test('inventory recaps ignore permanently untradable copies but still report held ones, labelled On hold', async () => {
+  const tradable = { assetId: 10, userAssetId: 1, onHold: false, tradable: true };
+  const classic = { assetId: 20, userAssetId: 2, onHold: false, tradable: false };
+  const held = { assetId: 30, userAssetId: 3, onHold: true, tradable: false };
+  // An untradable copy leaving, arriving or both is not a change worth a DM, and never counts in the totals.
+  assert.equal(diffInventory([tradable, classic], [tradable], items), null);
+  assert.equal(diffInventory([tradable], [tradable, classic], items), null);
+  const change = diffInventory([tradable, classic], [held, { ...classic, userAssetId: 4 }], items)!;
+  assert.equal(change.kind, 'trade');
+  assert.deepEqual(change.removed.map(c => c.userAssetId), [1]);
+  assert.deepEqual(change.added.map(c => c.userAssetId), [3]);
+  assert.deepEqual(change.before, { copies: 1, value: 50, rap: 50 });
+  assert.deepEqual(change.after, { copies: 1, value: 110, rap: 110 });
+  const text = inventoryChangeMessage(profile(), change, { card: false }).embeds[0]!.toJSON();
+  const fields = JSON.stringify(text.fields);
+  assert.match(fields, /⏳ On hold/);
+  assert.doesNotMatch(fields, /Not tradable/);
+  const png = await renderInventoryChangeCard(change, new Map());
+  assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
 });
 test('the alerts panel owns both DM toggles and their history; settings only links to it', () => {
   const user = profile();

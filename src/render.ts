@@ -29,7 +29,7 @@ export async function iconPng(name: string): Promise<Buffer> {
 
 const COLS = 4, CARD = 210, GAP = 14, THUMB = 150, CARD_H = 292;
 const FONT = 'sans-serif';
-const TAG_COLORS: Record<string, string> = { Tradable: '#238636', 'Not tradable': '#b42332', 'Tradability unknown': '#4e5058', rare: '#5865f2', projected: '#ed4245', hyped: '#f47b67', unpriced: '#4e5058', 'on hold': '#fee75c', 'value = rap': '#3ba55d' };
+const TAG_COLORS: Record<string, string> = { Tradable: '#238636', 'On hold': '#fee75c', 'Not tradable': '#b42332', 'Tradability unknown': '#4e5058', rare: '#5865f2', projected: '#ed4245', hyped: '#f47b67', unpriced: '#4e5058', 'on hold': '#fee75c', 'value = rap': '#3ba55d' };
 const fmt = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
 
 function rounded(ctx: SKRSContext2D, x: number, y: number, w: number, h: number, r: number): void {
@@ -98,7 +98,7 @@ export async function renderInventoryGrid(entries: InventoryEntry[], thumbnails:
 }
 
 // ---------- Trade cards ----------
-import { effectiveValue } from './domain.js';
+import { effectiveValue, tradabilityTag } from './domain.js';
 import type { Recommendation, PricedCopy, Totals } from './engine.js';
 import type { InventoryChange } from './changes.js';
 
@@ -107,8 +107,11 @@ const BUCKET_COLOR = { gain: '#57f287', even: '#b5bac1', loss: '#f0a95a' } as co
 type Cell = { copy: PricedCopy; count: number };
 /** Identical copies collapse into one square with a ×N badge, like the inventory grid. */
 function cells(copies: PricedCopy[]): Cell[] {
-  const map = new Map<number, Cell>();
-  for (const copy of copies) { const c = map.get(copy.assetId); if (c) c.count++; else map.set(copy.assetId, { copy, count: 1 }); }
+  const map = new Map<string, Cell>();
+  for (const copy of copies) {
+    const key = `${copy.itemTarget?.itemType ?? 'Asset'}:${copy.itemTarget?.targetId ?? copy.assetId}:${tradabilityTag(copy)}`;
+    const c = map.get(key); if (c) c.count++; else map.set(key, { copy, count: 1 });
+  }
   return [...map.values()];
 }
 /** Words on a two-sided card: the column headers, the totals-strip labels and the verdict under the arrow. */
@@ -166,6 +169,13 @@ async function renderExchangeCard(r: Exchange, thumbnails: Map<number, Buffer>, 
       ctx.font = `bold 13px ${FONT}`; const label = `×${cell.count}`; const w = ctx.measureText(label).width + 12;
       ctx.fillStyle = '#5865f2'; rounded(ctx, tx + T.thumb - w - 5, ty + 5, w, 21, 7); ctx.fill(); ctx.fillStyle = '#fff'; ctx.fillText(label, tx + T.thumb - w + 1, ty + 20);
     }
+    const status = tradabilityTag(cell.copy);
+    ctx.font = `bold 9px ${FONT}`;
+    const statusText = status === 'Tradability unknown' ? 'UNVERIFIED' : status.toUpperCase();
+    const sw = ctx.measureText(statusText).width + 8;
+    const statusColor = TAG_COLORS[status]!;
+    ctx.fillStyle = statusColor; rounded(ctx, tx + 4, ty + T.thumb - 37, sw, 14, 4); ctx.fill();
+    ctx.fillStyle = statusColor === '#fee75c' ? '#1e1f22' : '#fff'; ctx.fillText(statusText, tx + 8, ty + T.thumb - 27);
     const flags = [item.rare && 'RARE', item.projected && 'PROJ', item.hyped && 'HYPED', item.value === null && 'VALUE = RAP'].filter(Boolean) as string[];
     if (flags.length) {
       ctx.font = `bold 9px ${FONT}`; let fx = tx + 5;

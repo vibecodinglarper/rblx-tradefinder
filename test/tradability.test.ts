@@ -18,15 +18,16 @@ const verifiedCopy = (id: number, instance: string, held = false, type: 'Asset' 
 });
 const snapshot = (data: TradableCopy[]) => ({ data, fetchedAt: Date.now() });
 
-test('retained Rose Amazeface stays visible as Not tradable and cannot enter drafts', () => {
+test('a retained Rose Amazeface is permanently untradable: kept in the holdings but hidden from the inventory, and cannot enter drafts', () => {
   const inv = reconcileInventory(inventory(1, [rose, 10]), snapshot([verifiedCopy(10, 'hat')]), new Map());
   const entries = groupInventory(inv, prices);
   assert.equal(inv.holdings.length, 2);
-  assert.deepEqual(entries.find(e => e.assetId === rose)?.tags, ['Not tradable']);
+  assert.equal(inv.holdings.find(h => h.assetId === rose)?.tradable, false);
+  assert.deepEqual(entries.map(e => e.assetId), [10]);
   assert.deepEqual(priced(inv, prices).map(c => c.assetId), [10]);
-  const body = inventoryMessage(profile(), { view: 'text', page: 0, pages: 1, entries, copies: 2, total: 2, value: 50, rap: 50 });
+  const body = inventoryMessage(profile(), { view: 'text', page: 0, pages: 1, entries, copies: 1, total: 1, value: 50, rap: 50 });
   const text = body.embeds![0]!.toJSON().description!;
-  assert.match(text, /Rose Amazeface.*🚫 Not tradable/);
+  assert.doesNotMatch(text, /Rose Amazeface/);
   assert.match(text, /Item 10.*✅ Tradable/);
   const legacy = { ...inv.holdings[0]!, item: prices.get(rose)! };
   const recipient = { ...inventory(2, [20]).holdings[0]!, item: item(20, 4120) };
@@ -36,9 +37,10 @@ test('retained Rose Amazeface stays visible as Not tradable and cannot enter dra
 test('a real migrated bundle is separate from the retained classic face and keeps its pricing ID', () => {
   const inv = reconcileInventory(inventory(1, [rose]), snapshot([verifiedCopy(bundle, 'dynamic-copy', false, 'Bundle')]), new Map([[bundle, rose]]));
   const entries = groupInventory(inv, prices);
-  assert.equal(entries.length, 2);
-  assert.equal(entries.find(e => e.name === 'Rose Amazeface')?.tags[0], 'Not tradable');
-  assert.equal(entries.find(e => e.name.endsWith('(Bundle)'))?.tags[0], 'Tradable');
+  assert.equal(inv.holdings.length, 2);
+  assert.equal(entries.length, 1, 'the untradable classic face is not displayed');
+  assert.equal(entries[0]!.name, 'Rose Amazeface (Bundle)');
+  assert.equal(entries[0]!.tags[0], 'Tradable');
   const eligible = priced(inv, prices);
   assert.equal(eligible.length, 1);
   assert.equal(eligible[0]!.assetId, rose);
@@ -51,8 +53,20 @@ test('copy counts and hold status come from verified instances; stale extra copi
   const inv = reconcileInventory(raw, snapshot([verifiedCopy(10, 'free'), verifiedCopy(10, 'held', true)]), new Map());
   assert.equal(priced(inv, prices).length, 1);
   assert.equal(inv.holdings.filter(c => c.tradable === false).length, 2);
-  assert.deepEqual(groupInventory(inv, prices)[0]!.tags, ['1/3 tradable', '1 on hold']);
+  // The held copy is only temporarily untradable, so it stays in view; the stale public row is gone for good and is not shown.
+  const entry = groupInventory(inv, prices)[0]!;
+  assert.equal(entry.quantity, 2);
+  assert.deepEqual(entry.tags, ['1/2 tradable', '1 on hold']);
   assert.ok(raw.holdings.every(c => c.tradable === true && !c.onHold), 'reconciliation must not mutate shared public snapshots');
+});
+
+test('an item whose every copy is on hold is shown with a single on-hold tag, never as Not tradable', () => {
+  const inv = reconcileInventory(inventory(1, [10]), snapshot([verifiedCopy(10, 'held', true)]), new Map());
+  const entries = groupInventory(inv, prices);
+  assert.deepEqual(entries.map(e => e.tags), [['on hold']]);
+  const text = inventoryMessage(profile(), { view: 'text', page: 0, pages: 1, entries, copies: 1, total: 1, value: 0, rap: 0 }).embeds![0]!.toJSON().description!;
+  assert.match(text, /Item 10.*⏳ on hold/);
+  assert.doesNotMatch(text, /Not tradable/);
 });
 
 test('unmapped bundles remain visible but cannot accidentally use an asset with the same numeric ID for pricing', () => {
