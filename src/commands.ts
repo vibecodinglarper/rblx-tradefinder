@@ -15,4 +15,9 @@ export const tradeCommand = new SlashCommandBuilder().setName('trade').setDescri
   .addSubcommand(s => s.setName('inventory').setDescription('🎒 Show your available items and their Rolimons value/RAP'))
   .addSubcommand(s => s.setName('delete').setDescription('🗑️ Delete your tracked account, settings and alert history'));
 
-export const commandJSON = [tradeCommand.toJSON()];
+export const commandJSON = [tradeCommand.toJSON(),
+  new SlashCommandBuilder().setName('connect').setDescription('Connect your Roblox session privately to send trades').toJSON(),
+  new SlashCommandBuilder().setName('disconnect').setDescription('Remove your saved Roblox session and stop bot trade sending').toJSON(),
+  new SlashCommandBuilder().setName('find').setDescription('Find Roblox limited-item trades')
+    .addSubcommand(s => s.setName('trades').setDescription('Search trade offers and place a trade with your connected account')).toJSON(),
+];

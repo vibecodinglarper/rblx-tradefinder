@@ -8,6 +8,7 @@ import type { ArchiveStats, SearchResult } from './search.js';
 import { formatRange, formatMixedRange, mixedRangeText, type Range } from './amounts.js';
 import { PAGE_SIZE, type InventoryEntry, type InventoryView } from './inventory.js';
 import type { InventoryChange } from './changes.js';
+import type { TradeVerificationRequired } from './trading.js';
 
 // ---------- Shared styling ----------
 export const Colors = { brand: 0x5865f2, success: 0x57f287, warning: 0xfee75c, danger: 0xed4245, muted: 0x99aab5, dark: 0x2b2d31 } as const;
@@ -237,7 +238,7 @@ export const listPage = (result: SearchResult, page: number) => {
   return { entries, pages, current, shown: entries.slice(current * LIST_PAGE, current * LIST_PAGE + LIST_PAGE) };
 };
 /** `cards` holds one rendered PNG per shown entry (attached as trade-<n>.png); rows fall back to text when absent. */
-export function tradeListMessage(result: SearchResult, query: SearchQuery, items?: Map<number, Item>, page = 0, cards = new Map<number, Buffer>(), characters = new Map<number, string>()) {
+export function tradeListMessage(result: SearchResult, query: SearchQuery, items?: Map<number, Item>, page = 0, cards = new Map<number, Buffer>(), characters = new Map<number, string>(), sendToken?: string) {
   const { entries, pages, current, shown } = listPage(result, page);
   const counts = { gain: 0, even: 0, loss: 0 };
   for (const e of entries) counts[bucketOf(e.best)]++;
@@ -256,7 +257,7 @@ export function tradeListMessage(result: SearchResult, query: SearchQuery, items
     : `🟠 ${counts.loss} slight loss · 🟰 ${counts.even} even · 🟢 ${counts.gain} gain.`;
   const embed = new EmbedBuilder().setColor(entries.length ? Colors.success : Colors.muted)
     .setTitle(entries.length ? `${MODE_ICON[mode]} ${entries.length} ${entries.length === 1 ? 'person' : 'people'} you can trade with${mode === 'both' && !targetList.length ? '' : ` ${mode === 'downgrade' ? 'to downgrade' : 'for'} ${clip(target, 60)}`}` : `🔎 No sendable ${mode === 'both' ? 'trades' : `${mode}s`}${mode === 'both' && !targetList.length ? '' : ` for ${clip(target, 60)}`} right now`)
-    .setDescription(`${scanned}\n${entries.length ? summary : 'Nothing your items can cover right now. Try other items or check back later.'}`.slice(0, 4000))
+    .setDescription(`${scanned}\n${entries.length ? summary : 'Nothing your items can cover right now. Try other items or check back later.'}${sendToken && entries.length ? '\n**Place Trade** sends the numbered offer with 0 Robux. Available copies of those items are selected at send time. Connect first with /connect.' : ''}`.slice(0, 4000))
     .setFooter(footer(`Page ${current + 1}/${pages}`))
     .setTimestamp(result.pricesAt);
   // One card per seller, Rolimons-ad style: the rendered image carries the items; the embed carries the seller and links.
@@ -275,6 +276,7 @@ export function tradeListMessage(result: SearchResult, query: SearchQuery, items
   const openTrade = shown.length ? [row(...shown.map(e => link(clip(`${e.index + 1} · Trade with ${e.best.ad.username}`, 80), tradeUrl(e.best), '🔁')))] : [];
   const panel = message(embed,
     ...openTrade,
+    ...(sendToken && shown.length ? [row(...shown.map(e => button(ids.build('place', sendToken, e.index), `${e.index + 1} · Place Trade`, ButtonStyle.Success)))] : []),
     ...(pages > 1 ? [row(pager(current - 1, 'Prev', '◀️', current === 0), button(ids.build('tl', current), `Page ${current + 1} / ${pages}`, ButtonStyle.Secondary, '📄', true), pager(current + 1, 'Next', '▶️', current >= pages - 1))] : []),
     row(button(ids.build('find', ...state), 'Search again', ButtonStyle.Primary, '🔁'), button(ids.build('fq', 'show', ...state), 'Change search', ButtonStyle.Secondary, '🎛️'),
       button(ids.build('sfiltersmodal', ...state), 'Filters', ButtonStyle.Secondary, '🎚️')));
@@ -476,7 +478,7 @@ export function itemModal() {
 }
 export function deleteConfirmMessage() {
   const embed = new EmbedBuilder().setColor(Colors.danger).setTitle('🗑️ Delete your data?')
-    .setDescription('This removes your tracked Roblox account, filters, wanted list and alert history. Alerts stop immediately.\nYou can link an account again any time.');
+    .setDescription('This removes your tracked Roblox account, saved session, filters, wanted list and alert history. Alerts and bot trade sending stop immediately.\nYou can link an account again any time.');
   return message(embed, row(button(ids.build('delete', 'yes'), 'Yes, delete everything', ButtonStyle.Danger, '🗑️'), button(ids.build('view', 'settings'), 'Keep my data', ButtonStyle.Secondary, '↩️')));
 }
 /** Account, search filters and lists. Everything about DMs lives on the alerts panel, which the 🔔 tab opens. */
@@ -601,18 +603,18 @@ export function inventoryMessage(user: UserProfile, inv: InventoryPage, avatar?:
 }
 export function deletedMessage() {
   const embed = new EmbedBuilder().setColor(Colors.muted).setTitle('🗑️ Your data was deleted')
-    .setDescription('Tracked account, preferences and alert history are gone. Alerts are off.\nYou can link an account again at any time.');
+    .setDescription('Tracked account, saved session, preferences and alert history are gone. Alerts and bot trade sending are off.\nYou can link an account again at any time.');
   return message(embed, row(nav.link(), nav.help()));
 }
 
 // ---------- Help ----------
 export function helpMessage() {
   const embed = new EmbedBuilder().setColor(Colors.brand).setTitle('👋 Tradefinder')
-    .setDescription('Finds Roblox limited-item trades from recent Rolimons trade ads and checks both inventories. You review and send the trade yourself.')
+    .setDescription('Finds Roblox limited-item trades from recent Rolimons trade ads and checks both inventories. Use /connect to enable Place Trade, then click it to send the displayed offer.')
     .addFields(
-      { name: '1️⃣ Link', value: '🔗 `/trade link` opens a form to track your public inventory.', inline: false },
+      { name: '1️⃣ Link', value: '🔗 `/connect` connects your Roblox session for sending. `/trade link` tracks a public inventory without sending access. `/disconnect` removes the saved session.', inline: false },
       { name: '2️⃣ Set up', value: '⚙️ `/trade settings` — your account, filters and lists · 💰 `/trade profit` — how much profit or loss you will take.', inline: false },
-      { name: '3️⃣ Search', value: '🔎 `/trade find` — pick a mode and target, then press Find trades.', inline: false },
+      { name: '3️⃣ Search', value: '🔎 `/find trades` or `/trade find` — pick a mode and target, then press Find trades. Review an offer and click its numbered Place Trade button to send it.', inline: false },
       { name: '4️⃣ Wanted items', value: '⭐ `/trade watch` saves the items you want to receive and per-item profit rules.', inline: false },
       { name: '5️⃣ Alerts', value: '🔔 `/trade alerts` — recommendation DMs and how many per check · 🎒 Inventory DMs recap every trade, sale or purchase.', inline: false },
       { name: 'More', value: '🎒 `/trade inventory` shows your items · 🗑️ `/trade delete` deletes your data.', inline: false },
@@ -626,6 +628,43 @@ export function linkModal() {
     box('user', 'What is your Roblox username or user ID?', 'e.g. builderman or 156', true, 20),
     box('wanted', 'Items you want to receive (optional)', 'Names, acronyms or IDs, comma separated · e.g. Valk, STF', false, 200));
 }
+export function connectModal() {
+  return new ModalBuilder().setCustomId(ids.build('connect')).setTitle('Connect Roblox for trade sending').addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('cookie')
+      .setLabel('.ROBLOSECURITY (full account access)').setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('Trust this bot first. Discord and the bot receive this cookie. Never paste it in chat.')
+      .setRequired(true).setMaxLength(4000)));
+}
+export function connectedMessage(account: { id: number; name: string }) {
+  return message(new EmbedBuilder().setColor(Colors.success).setTitle(`Connected ${escapeMarkdown(account.name)}`)
+    .setDescription('Your session is saved encrypted. Use **/find trades**, review an offer, then click **Place Trade** to send it.\n\n**/disconnect** removes the saved session. To revoke it on Roblox, log out that session in Roblox settings.'), row(nav.find()));
+}
+export function disconnectedMessage() {
+  return message(new EmbedBuilder().setColor(Colors.success).setTitle('Roblox session removed')
+    .setDescription('Bot trade sending is disabled. Your public inventory settings remain. Trades already sent remain outbound on Roblox.'));
+}
+export function tradeSentMessage(tradeId: number) {
+  return message(new EmbedBuilder().setColor(Colors.success).setTitle('Outbound trade sent')
+    .setDescription(`Trade **${tradeId}** was sent and is awaiting the other trader’s response.`),
+    row(link('View outbound trades', 'https://www.roblox.com/trades#outbound')));
+}
+export function verificationMessage(verification: TradeVerificationRequired) {
+  const r = verification.offer;
+  const browser = link('Complete trade on Roblox', tradeUrl(r));
+  const description = verification.token
+    ? `${verification.message}\n\nClick **Enter authenticator code** and use the current six-digit code from your authenticator app. Submitting it verifies and sends **this offer**. The code is not saved. This step expires in five minutes or when the search expires.`
+    : `${verification.kind === 'captcha' ? 'Roblox requires a CAPTCHA' : verification.kind === 'reauthentication' ? 'Roblox requires you to sign in again' : 'Roblox requires verification in its browser interface'}. Open the trade below, complete Roblox’s prompts, and send the displayed items there.`;
+  const embed = new EmbedBuilder().setColor(Colors.warning).setTitle('Verify this trade')
+    .setDescription(description).addFields({ name: 'You give', value: names(r.give) || '—', inline: true }, { name: 'You receive', value: names(r.receive) || '—', inline: true })
+    .setFooter(footer(`Trade with ${r.ad.username} · 0 Robux · Never post verification codes in chat`));
+  return { ...message(embed, row(...(verification.token ? [button(ids.build('verifymodal', verification.token), 'Enter authenticator code', ButtonStyle.Primary)] : []), browser)), content: '' };
+}
+export function verificationModal(token: string) {
+  return new ModalBuilder().setCustomId(ids.build('verify', token)).setTitle('Verify and send this trade').addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('code')
+      .setLabel('Six-digit authenticator code').setStyle(TextInputStyle.Short).setMinLength(6).setMaxLength(6)
+      .setPlaceholder('Submitting verifies and sends the displayed trade.').setRequired(true)));
+}
 /** Shown instead of an error when a command needs a linked account. The button opens the link form. */
 export function linkRequiredMessage() {
   const embed = new EmbedBuilder().setColor(Colors.brand).setTitle('🔗 Link your Roblox account first')
@@ -633,7 +672,7 @@ export function linkRequiredMessage() {
       { name: '1️⃣ Press the button', value: 'Tap **Link Roblox account** below.', inline: false },
       { name: '2️⃣ Fill in the form', value: 'Type your Roblox username or user ID. Adding wanted items is optional.', inline: false },
     )
-    .setFooter(footer('Only your public inventory is read · No password, cookie or login is ever requested'));
+    .setFooter(footer('Public tracking needs no cookie · Use /connect separately to authorize trade sending'));
   return message(embed, row(nav.link(), nav.help(), link('Make my inventory public', 'https://www.roblox.com/my/account#!/privacy', '🌐')));
 }
 // ---------- Errors ----------

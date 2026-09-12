@@ -16,6 +16,9 @@ import {
 } from './presentation.js';
 import type { SearchResult, SearchService } from './search.js';
 import type { Store } from './store.js';
+import { randomBytes } from 'node:crypto';
+import { TradingService, TradeVerificationRequired } from './trading.js';
+import { connectModal, connectedMessage, disconnectedMessage, tradeSentMessage, verificationMessage, verificationModal } from './presentation.js';
 
 type Replyable = ChatInputCommandInteraction | MessageComponentInteraction | ModalSubmitInteraction;
 /** Component actions that redraw the panel they were clicked on instead of posting a new message. */
@@ -36,9 +39,9 @@ export class Bot {
   private busy = new Set<string>();
   private lastSearch = new Map<string, number>();
   /** Latest finder result per user, so paging and details never re-run the search. */
-  private results = new Map<string, { result: SearchResult; query: SearchQuery; at: number }>();
+  private results = new Map<string, { result: SearchResult; query: SearchQuery; at: number; token: string; robloxId: number }>();
   private static RESULT_TTL = 15 * 60_000;
-  constructor(private store: Store, private search: SearchService, private scanSeconds = 60) {}
+  constructor(private store: Store, private search: SearchService, private scanSeconds = 60, private trading = new TradingService(store)) {}
   private profile(id: string): UserProfile {
     const user = this.store.get(id);
     if (!user) throw new NotLinkedError('Link a Roblox account first.');
@@ -63,15 +66,23 @@ export class Bot {
   private async fail(i: Replyable, error: unknown): Promise<void> {
     const expected = error instanceof UserError;
     if (!expected) console.error('Interaction failed:', error instanceof Error ? error.name : 'Unknown error');
-    const payload = error instanceof NotLinkedError ? linkRequiredMessage() : errorMessage(expected ? error.message : 'The command could not be completed. Try again shortly.', expected);
+    const payload = error instanceof TradeVerificationRequired ? verificationMessage(error)
+      : error instanceof NotLinkedError ? linkRequiredMessage() : errorMessage(expected ? error.message : 'The command could not be completed. Try again shortly.', expected);
     try { if (i.deferred || i.replied) await i.editReply(payload); else await i.reply({ ...payload, flags: MessageFlags.Ephemeral }); } catch { /* Interaction expired. */ }
   }
   async handle(i: ChatInputCommandInteraction): Promise<void> {
-    if (i.commandName !== 'trade') return;
+    if (!['trade', 'connect', 'disconnect', 'find'].includes(i.commandName)) return;
     if (this.busy.has(i.user.id)) { await i.reply({ ...errorMessage('Your previous command is still running.'), flags: MessageFlags.Ephemeral }); return; }
     this.busy.add(i.user.id);
     try {
-      const sub = i.options.getSubcommand();
+      if (i.commandName === 'connect') { this.trading.available(); await i.showModal(connectModal()); return; }
+      if (i.commandName === 'disconnect') {
+        await i.deferReply({ flags: MessageFlags.Ephemeral });
+        this.store.disconnect(i.user.id); this.results.delete(i.user.id);
+        this.trading.cancelVerification(i.user.id);
+        await i.editReply(disconnectedMessage()); return;
+      }
+      const sub = i.commandName === 'find' ? 'find' : i.options.getSubcommand();
       // Forms must be the first response to an interaction, so they are shown before any deferral.
       if (sub === 'link') { await i.showModal(linkModal()); return; }
       await i.deferReply({ flags: MessageFlags.Ephemeral });
@@ -86,6 +97,11 @@ export class Bot {
     if (this.busy.has(i.user.id)) { await i.reply({ ...errorMessage('Your previous command is still running.'), flags: MessageFlags.Ephemeral }); return; }
     this.busy.add(i.user.id);
     try {
+      if (parsed.action === 'verifymodal' && !i.isModalSubmit()) {
+        const token = parsed.args[0] ?? '';
+        this.trading.checkVerification(i.user.id, token);
+        await i.showModal(verificationModal(token)); return;
+      }
       const modal = MODALS[parsed.action];
       if (modal) {
         if (!i.isModalSubmit()) await i.showModal(modal(parsed.args, () => this.profile(i.user.id)));
@@ -138,6 +154,17 @@ export class Bot {
     return n;
   }
   private async act(i: MessageComponentInteraction | ModalSubmitInteraction, action: string, args: string[]) {
+    if (action === 'verify' && i.isModalSubmit()) {
+      const tradeId = await this.trading.verifyAndPlace(i.user.id, args[0] ?? '', i.fields.getTextInputValue('code'), async content => {
+        await i.editReply({ content, embeds: [], components: [] });
+      });
+      return { ...tradeSentMessage(tradeId), content: '' };
+    }
+    if (action === 'connect' && i.isModalSubmit()) {
+      const account = await this.trading.connect(i.user.id, i.fields.getTextInputValue('cookie'));
+      this.results.delete(i.user.id); this.lastSearch.delete(i.user.id);
+      return connectedMessage(account);
+    }
     if (action === 'link' && i.isModalSubmit()) return this.link(i.user.id, i.fields.getTextInputValue('user').trim(), i.fields.getTextInputValue('wanted'));
     if (action === 'view') {
       if (args[0] === 'help') return helpMessage();
@@ -149,11 +176,25 @@ export class Bot {
       if (args[0] === 'items') return itemsPanel(user, await this.itemNames());
     }
     const user = this.profile(i.user.id);
+    if (action === 'place') {
+      const cached = this.results.get(user.discordId);
+      if (!cached || cached.token !== args[0] || cached.robloxId !== user.robloxId || Date.now() - cached.at > Bot.RESULT_TTL) {
+        throw new UserError('This offer has expired or belongs to another search. Run /find trades again.');
+      }
+      const index = args[1] && /^\d+$/.test(args[1]) ? Number(args[1]) : -1;
+      const offer = listPage(cached.result, 0).entries.find(e => e.index === index)?.best;
+      if (!offer || args.length !== 2) throw new UserError('This offer is no longer available. Run /find trades again.');
+      const tradeId = await this.trading.place(user, offer, cached.at + Bot.RESULT_TTL, async content => {
+        await i.editReply({ content, embeds: [], components: [] });
+      });
+      return { ...tradeSentMessage(tradeId), content: '' };
+    }
     if (action === 'inv') return this.inventory(user, args[0] === 'text' ? 'text' : 'grid', Number(args[1]) || 0);
     if (action === 'tl') {
       const cached = this.results.get(user.discordId);
       if (!cached || Date.now() - cached.at > Bot.RESULT_TTL) { this.results.delete(user.discordId); return expiredSearchMessage(); }
-      return this.tradeList(cached.result, cached.query, Number(args[0]) || 0);
+      if (cached.robloxId !== user.robloxId) { this.results.delete(user.discordId); return expiredSearchMessage(); }
+      return this.tradeList(cached.result, cached.query, Number(args[0]) || 0, cached.token);
     }
     if (action === 'sfilters' && i.isModalSubmit()) {
       const updated = { ...user.preferences };
@@ -185,6 +226,7 @@ export class Bot {
     if (action === 'delete') {
       if (args[0] !== 'yes') return deleteConfirmMessage();
       this.store.forget(user.discordId); this.lastSearch.delete(user.discordId); this.results.delete(user.discordId);
+      this.trading.cancelVerification(user.discordId);
       return deletedMessage();
     }
     if (action === 'fq') {
@@ -245,7 +287,7 @@ export class Bot {
     throw new UserError('This button is no longer supported. Run the command again.');
   }
   private async execute(i: ChatInputCommandInteraction): Promise<void> {
-    const sub = i.options.getSubcommand();
+    const sub = i.commandName === 'find' ? 'find' : i.options.getSubcommand();
     if (sub === 'help') { await i.editReply(helpMessage()); return; }
     const user = this.profile(i.user.id);
     const items = () => this.itemNames();
@@ -261,7 +303,7 @@ export class Bot {
     }
   }
   /** One page of the trade list with a rendered Rolimons-style card per seller; a card that fails to render falls back to text. */
-  private async tradeList(result: SearchResult, query: SearchQuery, page: number) {
+  private async tradeList(result: SearchResult, query: SearchQuery, page: number, token: string) {
     const { shown } = listPage(result, page);
     const assetIds = shown.flatMap(e => [...e.best.give, ...e.best.receive].map(c => c.assetId));
     const thumbnails = await this.search.provider.thumbnails?.(assetIds).catch(() => new Map<number, Buffer>()) ?? new Map<number, Buffer>();
@@ -271,7 +313,7 @@ export class Bot {
     // Each seller's character render; a thumbnail outage just leaves the card without one.
     const characters = new Map<number, string>();
     await Promise.all(shown.map(async e => { const url = await this.search.provider.character?.(e.best.ad.userId).catch(() => null); if (url) characters.set(e.best.ad.userId, url); }));
-    return { ...tradeListMessage(result, query, await this.itemNames(), page, cards, characters), files };
+    return { ...tradeListMessage(result, query, await this.itemNames(), page, cards, characters, token), files };
   }
   /** Sets the find panel's target from a typed name/acronym/ID, offering a pick list when several items match. */
   /**
@@ -376,6 +418,8 @@ export class Bot {
     const roblox = await this.search.provider.user(input);
     const inventory = await this.search.provider.inventory(roblox.id);
     const user = this.store.link(discordId, roblox.id, roblox.name);
+    this.trading.cancelVerification(discordId);
+    this.results.delete(discordId);
     // The optional form box seeds the wanted list; unmatched entries are reported, not fatal.
     const notes: string[] = [];
     if (wanted.trim()) {
@@ -451,8 +495,11 @@ export class Bot {
       for (let i = 0; i < Math.max(ups.length, downs.length); i++) { if (ups[i]) mixed.push(ups[i]!); if (downs[i]) mixed.push(downs[i]!); }
       result.recommendations = mixed;
     }
-    this.results.set(user.discordId, { result, query, at: Date.now() });
-    await i.editReply(await this.tradeList(result, query, 0));
+    const token = randomBytes(16).toString('hex');
+    this.trading.cancelVerification(user.discordId);
+    for (const [id, cached] of this.results) if (Date.now() - cached.at > Bot.RESULT_TTL) this.results.delete(id);
+    this.results.set(user.discordId, { result, query, at: Date.now(), token, robloxId: user.robloxId });
+    await i.editReply(await this.tradeList(result, query, 0, token));
   }
   /** Items the user can give away in downgrade mode: available, non-projected, priced; most valuable first. */
   private async giveChoices(user: UserProfile): Promise<GiveChoice[]> {

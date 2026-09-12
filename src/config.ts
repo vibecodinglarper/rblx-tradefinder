@@ -5,6 +5,7 @@ const schema = z.object({
   DISCORD_CLIENT_ID: z.string().regex(/^\d+$/),
   DISCORD_GUILD_ID: z.string().regex(/^\d+$/).optional(),
   DATABASE_PATH: z.string().default('./data/tradefinder.sqlite'),
+  ROBLOX_CREDENTIAL_KEY: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   POLL_INTERVAL_SECONDS: z.coerce.number().int().min(60).max(3600).default(180),
   MAX_SELLERS_PER_SEARCH: z.coerce.number().int().min(1).max(100).default(30),
   /** The rolling ad archive: how far back it reaches, and the hard row cap that bounds it however busy the feed is. */
@@ -14,7 +15,7 @@ const schema = z.object({
   HEALTH_PORT: z.coerce.number().int().min(0).max(65535).default(0),
 });
 export function config() {
-  const result = schema.safeParse({ ...process.env, DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID || undefined });
+  const result = schema.safeParse({ ...process.env, DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID || undefined, ROBLOX_CREDENTIAL_KEY: process.env.ROBLOX_CREDENTIAL_KEY || undefined });
   if (!result.success) throw new Error(`Invalid configuration: ${result.error.issues.map(i => i.path.join('.')).join(', ')}. See .env.example.`);
   return result.data;
 }

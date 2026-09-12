@@ -1,8 +1,8 @@
 # Roblox Tradefinder
 
-A Discord bot that reads Rolimons trade ads, checks public Roblox inventories, and recommends limited-item exchanges with the calculations and links you need to review and send them yourself.
+A Discord bot that reads Rolimons trade ads, checks public Roblox inventories, and recommends limited-item exchanges you can review and send with **Place Trade** after connecting your Roblox account.
 
-Every reply is a private, styled Discord embed with buttons. Nothing is posted publicly, the bot never submits trades, and no Roblox password or cookie is ever requested.
+Every reply is a private, styled Discord embed with buttons. `/connect` accepts a Roblox session cookie in a private modal, verifies the account and saves the session encrypted. The bot sends an outbound trade only when you click its **Place Trade** button.
 
 <p align="center"><img src="docs/screenshots/recommendation.png" width="640" alt="A trade recommendation card: seller avatar, give and receive columns with Rolimons links, value, RAP and balance tiles, reasoning, warnings, and buttons to open the Roblox trade, re-check the exchange or stop alerts"></p>
 
@@ -19,6 +19,9 @@ Every reply is a private, styled Discord embed with buttons. Nothing is posted p
 
 Rendered from synthetic data with `npm run screenshots`; they show the real embed and component payloads the bot sends.
 
+| `/connect` | Private session-cookie form. Verifies your identity and trade eligibility, then enables Place Trade. |
+| `/disconnect` | Removes the saved Roblox session and disables sending. |
+| `/find trades` | Alias for `/trade find`, including numbered Place Trade buttons. |
 | `/trade help` | `/trade profit` |
 | --- | --- |
 | ![Help panel with numbered steps and a Link Roblox account button](docs/screenshots/help.png) | ![Trade profit panel with the loss you accept, profit range, per-item rules and overpay caps](docs/screenshots/profit.png) |
@@ -51,7 +54,7 @@ Requires **Node.js 24.17 or newer** and a Discord application.
    cp .env.example .env
    ```
 
-3. Edit `.env`: set `DISCORD_TOKEN` and your application's `DISCORD_CLIENT_ID`. Set `DISCORD_GUILD_ID` to your test server ID for server-scoped command registration. Keep `.env` private.
+3. Edit `.env`: set `DISCORD_TOKEN` and your application's `DISCORD_CLIENT_ID`. Set `DISCORD_GUILD_ID` to your test server ID for server-scoped command registration. To enable `/connect`, generate a key with `openssl rand -hex 32` and set `ROBLOX_CREDENTIAL_KEY` to the result. Keep this key separate from the SQLite database, retain it across restarts, and keep `.env` private. Without the key, public inventory tracking and searching still work, but connections are disabled.
 4. In the Developer Portal's installation settings, enable a **Guild Install** with the `bot` and `applications.commands` scopes. Install in your server. Only the Guilds gateway intent is used; no Message Content or Server Members privileged intents or Administrator permission are needed. The bot uses private command replies and personal DMs.
 5. Register and start:
 
@@ -66,15 +69,18 @@ For development use `npm run dev`. With no guild ID, `npm run register` register
 The bot process must keep running for alerts. In Discord, run:
 
 ```text
-/trade link      → fill in your Roblox username in the form
+/connect         → enter your Roblox session cookie in the private form
+/trade link      → alternatively, track a public inventory without sending access
 /trade settings  → click a mode, pick demand
 /trade profit    → press ✏️ Edit profit / loss
 /trade watch     → press ⭐ Add wanted item
-/trade find      → choose mode and target, press 🚀 Search now
+/find trades     → choose mode and target, search, then review and click Place Trade
 /trade alerts    → press 🔔 Turn alerts on
 ```
 
-Make the Roblox inventory public. Linking tracks public data; it is **not ownership verification** and grants no authority over the Roblox account. No Roblox password, cookie or API credential is requested.
+Make the Roblox inventory public for discovery. `/trade link` only tracks public data and does not verify ownership or authorize sending. `/connect` verifies the cookie’s authenticated identity and trading eligibility, then links that account. Switching accounts clears previous sending credentials and resets preferences and alerts.
+
+A `.ROBLOSECURITY` cookie grants full account access. Only connect to a bot and operator you trust; Discord and the bot receive the modal submission. Never paste it into a chat message. The bot stores sessions using AES-256-GCM with account-bound authenticated encryption and never includes cookies or upstream response bodies in replies or logs. `/disconnect` removes the saved session while preserving public tracking; `/trade delete` also removes it. These commands do not cancel existing outbound trades or revoke the Roblox session itself; log out that session in Roblox settings to revoke it. Changing or losing the encryption key requires users to reconnect.
 
 ## Commands
 
@@ -84,7 +90,7 @@ Every command takes **no options**. Run it and a private panel appears; everythi
 | --- | --- |
 | `/trade help` | 👋 Getting-started panel with shortcut buttons to every other panel. |
 | `/trade link` | 🔗 Form for a Roblox username or numeric user ID. Changing accounts resets settings and disables alerts. |
-| `/trade find` | 🔎 Trade finder with three modes. **Both** (default): one search covering upgrades and downgrades, each ranked by its own rule. **Upgrade**: pick or type items you want (several at once); the bot screens every archived ad for people offering them, builds bundles of up to 4 of your items for 1 of theirs, slight losses first because sellers accept them. **Downgrade**: pick one of your items to give away; the bot screens every ad for bundles, closest to +10% first. Every mode uses your own loss floor from `/trade profit`; gains are kept to a realistic +10% unless the seller's ad asks for exactly the items you would give. In Both mode the list alternates upgrade-shaped and downgrade-shaped sellers. **Affordable** limits what you receive to the band your items can pay for (cheapest copy up to your four most valuable together); type your own value range under Filters to replace that band. Any ad offering the item counts; seller tags and requests are only hints. Projected items never take part in the maths. Results are Rolimons-style cards with a **Trade with …** button under each. **Filters** adds a downgrade profit range and an upgrade overpay range (each side a percent or a value), the receive value range and ad age. |
+| `/trade find` | 🔎 Trade finder with three modes. **Both** (default): one search covering upgrades and downgrades, each ranked by its own rule. **Upgrade**: pick or type items you want (several at once); the bot screens every archived ad for people offering them, builds bundles of up to 4 of your items for 1 of theirs, slight losses first because sellers accept them. **Downgrade**: pick one of your items to give away; the bot screens every ad for bundles, closest to +10% first. Every mode uses your own loss floor from `/trade profit`; gains are kept to a realistic +10% unless the seller's ad asks for exactly the items you would give. In Both mode the list alternates upgrade-shaped and downgrade-shaped sellers. **Affordable** limits what you receive to the band your items can pay for (cheapest copy up to your four most valuable together); type your own value range under Filters to replace that band. Any ad offering the item counts; seller tags and requests are only hints. Projected items never take part in the maths. Results are Rolimons-style cards with numbered **Place Trade** buttons and **Trade with …** browser links. **Filters** adds a downgrade profit range and an upgrade overpay range (each side a percent or a value), the receive value range and ad age. |
 | `/trade profit` | 💰 How much profit or loss you will take on a trade: the loss you accept (gains are realistic, +10% at most, unless the ad asks for your exact items), a profit range and per-item profit rules. **Edit profit / loss** opens the form. Value-based only; projected items are always excluded. |
 | `/trade watch` | ⭐ Wanted items panel: add several items at once (comma separated names, acronyms or IDs), remove or clear through the menus, and set **per-item profit rules** (a profit range that applies whenever a trade brings that item in). Up to 100 wanted items, 25 rules; the remove menus take several picks at once. |
 | `/trade alerts` | 🔔 Everything about DMs: toggles for recommendation and inventory alerts, how many trades each check may send, the last DM and the last alert error. |
@@ -94,7 +100,7 @@ Every command takes **no options**. Run it and a private panel appears; everythi
 
 ## Interactive UI
 
-Every form box is validated before anything is saved: a rejected entry names the box, says what it accepts and quotes what was typed, and the stored value is left untouched. Every reply is a private embed with buttons that redraw in place. Recommendation cards carry **Open Roblox trade**, **Roblox profile** and **Rolimons player** links plus **Re-check now** (re-evaluates that exact exchange against fresh inventories) and, on alert DMs, **Stop alerts**. Result lists are numbered **Trade with …** buttons, one per seller, plus **Search again** and **Change search**. Each panel only offers buttons that relate to it.
+Every form box is validated before anything is saved: a rejected entry names the box and says what it accepts; credential input is never echoed, and the stored value is left untouched. Every reply is a private embed with buttons that redraw in place. Recommendation cards carry **Open Roblox trade**, **Roblox profile** and **Rolimons player** links plus **Re-check now** (re-evaluates that exact exchange against fresh inventories) and, on alert DMs, **Stop alerts**. Result lists have numbered **Place Trade** and **Trade with …** buttons, one per seller, plus **Search again** and **Change search**. Place Trade immediately sends the displayed item quantities with **0 Robux**, using fresh available copies of each catalog item; serial-number selection is not supported. Buttons belong to one Discord user, Roblox account and search, expire after 15 minutes, and stop working after a new search, reconnect, disconnect or restart. Each panel only offers buttons that relate to it.
 
 Registering with `DISCORD_GUILD_ID` set also clears any global registration, so `/trade` never appears twice in a server.
 
@@ -158,7 +164,9 @@ The score ranks current snapshots. It is **not a statistically calibrated probab
 - Price cache: 120 seconds; recent ads: 30 seconds; inventories: 60 seconds. No stale-on-error fallback. Results over five minutes old are rejected. An inventory pagination limit of 100 pages (10,000 copies) fails explicitly instead of returning a partial inventory. Snapshots cannot be atomic across pages or accounts; recheck at trade time.
 - The monitor runs every 180 seconds **after the previous scan finishes**, sharing API caches and spacing requests by host. It sends up to two new recommendations per subscriber per cycle. Each recipient/partner/item-bundle combination is suppressed for 24 hours, including reposted ads, and persists across restarts. Failed sends are not marked delivered. A crash between Discord delivery and writing its receipt can cause one duplicate on restart.
 - DMs require opt-in. Each seller/item pair is alerted once per 24 hours whatever bundle of your items pays for it, up to `alertsPerScan` alerts per scan (three by default; set it on `/trade alerts`, scans run every minute) and an hourly ceiling of thirty per slot, never under sixty. Blocked DMs disable alerts and leave an explanation in `/trade settings`; transient failures retry later. Preferences are rechecked before delivery. Manual searches are limited to one per user per 30 seconds. A single bot process should use the database; horizontal multi-process coordination is not implemented.
-- Each recommendation supplies copy IDs, prices, value/RAP totals and percentage changes, risk notes, timestamps, partner links and manual trading guidance. The bot does not submit trades, impersonate users or message counterparties. Premium status and trading permissions are checked by the user in Roblox.
+- Place Trade verifies the cookie’s authenticated identity, both accounts’ eligibility, current item limits and available inventory before calling `POST https://trades.roblox.com/v2/trades/send`. It uses string `collectibleItemInstanceIds` from authenticated v2 inventories, never catalog IDs or v1 numeric copy IDs. The price calculation remains the displayed search snapshot; inventories can change between validation and sending.
+- Authenticated requests use fixed Roblox HTTPS hosts, reject redirects and have a 12-second timeout. Inventory reads share a queue across connected accounts, with at least 5.5 seconds between requests, so sender and recipient checks cannot collide with Roblox’s five-second limit. GET rate limits honor Retry-After (seconds or HTTP dates) and retry at most twice within the offer’s lifetime, with a private waiting message. POST requests retry only a CSRF rejection, once; send rate limits report the remaining wait and require a new explicit click. For a supported two-step challenge, the bot shows **Verify this trade** with the exact item quantities and an **Enter authenticator code** button. The private form submits the six-digit code to Roblox, continues that challenge, rechecks both inventories and sends the same offer with Roblox’s verification proof. Codes are never persisted or logged. Verification is bound to the Discord user, Roblox account and connected session; it expires after five minutes or the search lifetime, permits at most three submitted codes, and is invalidated by a new search, disconnect, relink or restart. CAPTCHA, sign-in and unsupported challenges offer a direct **Complete trade on Roblox** link. No automatic challenge bypass or send loop is used. The authenticator endpoint is documented in [Roblox’s two-step verification API](https://create.roblox.com/docs/cloud/reference/domains/twostepverification); challenge continuation follows [Roblox’s browser client](https://js.rbxcdn.com/70a780b0c5eef6336ec626e544c98e75cb12f38e208eae0735dd42b118f6ba72-Challenge.js).
+- SQLite claims prevent concurrent duplicate sends for the same Roblox accounts and item quantities. Successful offers are blocked from repetition for 24 hours. A timeout, ambiguous server response or crash during sending leaves a durable block: check outbound trades on Roblox and handle any retry there. Pending hashes are retained until an operator reconciles them; they survive disconnect and account deletion to avoid accidental duplicate sends. Definite rejections release the claim for a later explicit click. Live trade sending is not part of the test suite.
 
 ## Validation
 

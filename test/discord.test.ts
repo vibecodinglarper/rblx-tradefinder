@@ -6,7 +6,8 @@ import { SearchService } from '../src/search.js';
 import { fixtureProvider, profile } from './fixtures.js';
 
 test('slash command definition is valid and within Discord limits', () => {
-  assert.equal(commandJSON.length, 1); assert.equal(commandJSON[0]?.name, 'trade');
+  assert.deepEqual(commandJSON.map(c => c.name), ['trade', 'connect', 'disconnect', 'find']);
+  assert.equal(commandJSON.find(c => c.name === 'find')?.options?.[0]?.name, 'trades');
   assert.ok(commandJSON[0]!.options!.length <= 25);
   const names = commandJSON[0]!.options!.map(o => o.name);
   for (const expected of ['link', 'inventory', 'find', 'profit', 'settings', 'watch', 'alerts', 'delete']) assert.ok(names.includes(expected));

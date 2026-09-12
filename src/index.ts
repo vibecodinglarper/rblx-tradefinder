@@ -37,7 +37,7 @@ function stampLogs(): void {
 async function main() {
   stampLogs();
   const env = config();
-  const store = new Store(env.DATABASE_PATH, { hours: env.AD_ARCHIVE_HOURS, maxAds: env.AD_ARCHIVE_MAX_ADS });
+  const store = new Store(env.DATABASE_PATH, { hours: env.AD_ARCHIVE_HOURS, maxAds: env.AD_ARCHIVE_MAX_ADS }, env.ROBLOX_CREDENTIAL_KEY);
   const client = new Client({ intents: [GatewayIntentBits.Guilds], allowedMentions: { parse: [] } });
   const providers = new Providers();
   const search = new SearchService(providers, env.MAX_SELLERS_PER_SEARCH, store);
