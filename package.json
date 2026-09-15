@@ -15,12 +15,14 @@
     "test": "tsx --test test/*.test.ts",
     "check": "npm run build && npm test",
     "smoke": "node --import tsx scripts/smoke.ts",
+    "firestore": "node --env-file-if-exists=.env --import tsx scripts/firestore.ts",
     "demo": "node --import tsx scripts/demo.ts",
     "screenshots": "node --import tsx scripts/screenshots.ts && python3 scripts/screenshot.py"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.9",
     "discord.js": "^14.27.0",
+    "firebase-admin": "^14.4.0",
     "zod": "^4.6.1"
   },
   "devDependencies": {

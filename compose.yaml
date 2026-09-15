@@ -6,11 +6,14 @@ services:
     environment:
       DATABASE_PATH: /app/data/tradefinder.sqlite
       HEALTH_PORT: 8080
+      FIREBASE_SERVICE_ACCOUNT: /run/secrets/firebase-service-account
     ports:
       - "8080:8080"
     volumes:
       # The ad archive and every linked account live here; it has to outlive the container.
       - bot-data:/app/data
+    secrets:
+      - firebase-service-account
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 60s
@@ -19,3 +22,7 @@ services:
       retries: 3
 volumes:
   bot-data:
+secrets:
+  # The Firebase service account JSON, kept outside the image. The ad archive and heartbeat live in that project.
+  firebase-service-account:
+    file: ./secrets/firebase-service-account.json

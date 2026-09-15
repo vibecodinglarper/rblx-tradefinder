@@ -283,7 +283,7 @@ const coverageLine = (c: Coverage) => {
   if (!c?.count) return 'Archive filling up; the live feed is used meanwhile';
   const rolling = c.maxAds ? ` of ${number(c.maxAds)} kept` : '';
   const rate = c.perHour ? ` · ~${number(c.perHour)}/h` : '';
-  const size = c.bytes ? ` · ${(c.bytes / 1048576).toFixed(1)} MB on disk` : '';
+  const size = c.bytes ? ` · ${(c.bytes / 1048576).toFixed(1)} MB ${c.storage === 'firestore' ? 'in Firestore' : 'on disk'}` : '';
   return `${number(c.count)} ads${rolling} · back ${reach(c.minutes)}${rate}${size}`;
 };
 /** An item the user could give away in downgrade mode. */

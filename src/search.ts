@@ -10,7 +10,7 @@ export interface SearchOptions {
 import type { DataProvider } from './providers.js';
 
 /** Where past polls of the ad feed are kept; the Store implements it. */
-export interface ArchiveStats { count: number; minutes: number; perHour?: number; bytes?: number; retentionHours?: number; maxAds?: number }
+export interface ArchiveStats { count: number; minutes: number; perHour?: number; bytes?: number; retentionHours?: number; maxAds?: number; storage?: 'disk' | 'firestore' }
 export interface AdArchive {
   saveAds(ads: TradeAd[]): number;
   recentAds(maxAgeMs: number, now?: number): TradeAd[];

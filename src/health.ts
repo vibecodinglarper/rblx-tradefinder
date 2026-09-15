@@ -7,6 +7,8 @@ export interface HealthReport {
   lastScanAt: number | null;
   /** Rolling ad archive: rows kept, how far back they reach, and the file size on disk. */
   archive: { count: number; minutes: number; bytes: number };
+  /** The last archive store failure, when the archive lives in Firestore. */
+  archiveError?: string | null;
 }
 
 /**
@@ -37,7 +39,7 @@ export function startHealthServer(port: number, report: () => HealthReport, stal
       status: ready ? 'ok' : 'unhealthy',
       discord: state.discord ? 'connected' : 'disconnected',
       lastScanSecondsAgo: state.lastScanAt === null ? null : Math.round((now - state.lastScanAt) / 1000),
-      archive: { ads: state.archive.count, reachMinutes: state.archive.minutes, megabytes: Number((state.archive.bytes / 1048576).toFixed(1)) },
+      archive: { ads: state.archive.count, reachMinutes: state.archive.minutes, megabytes: Number((state.archive.bytes / 1048576).toFixed(1)), ...(state.archiveError ? { error: state.archiveError } : {}) },
       uptimeSeconds: Math.round(process.uptime()),
     });
     response.writeHead(ready ? 200 : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' });

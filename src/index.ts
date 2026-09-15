@@ -6,7 +6,8 @@ import { SearchService } from './search.js';
 import { Store } from './store.js';
 import { Bot } from './bot.js';
 import { Monitor } from './monitor.js';
-import { startHealthServer } from './health.js';
+import { startHealthServer, type HealthReport } from './health.js';
+import { openFirestore } from './firestore.js';
 import { alertMessage, inventoryChangeMessage, setStatIcons } from './presentation.js';
 import { bucketOf } from './engine.js';
 import { iconPng, renderInventoryChangeCard, renderTradeCard } from './render.js';
@@ -38,24 +39,37 @@ function stampLogs(): void {
 async function main() {
   stampLogs();
   const env = config();
-  const store = new Store(env.DATABASE_PATH, { hours: env.AD_ARCHIVE_HOURS, maxAds: env.AD_ARCHIVE_MAX_ADS }, env.ROBLOX_CREDENTIAL_KEY);
+  const policy = { hours: env.AD_ARCHIVE_HOURS, maxAds: env.AD_ARCHIVE_MAX_ADS };
+  const store = new Store(env.DATABASE_PATH, policy, env.ROBLOX_CREDENTIAL_KEY);
+  // With a service account the ad archive lives in Firestore, so it follows the bot from host to host; without one it stays in SQLite.
+  const firestore = env.FIREBASE_SERVICE_ACCOUNT || env.FIREBASE_SERVICE_ACCOUNT_JSON
+    ? openFirestore({ serviceAccountPath: env.FIREBASE_SERVICE_ACCOUNT, serviceAccountJson: env.FIREBASE_SERVICE_ACCOUNT_JSON, prefix: env.FIRESTORE_PREFIX }, policy) : null;
+  const archive = firestore?.archive ?? store;
+  if (firestore) {
+    const loaded = await firestore.archive.load();
+    // First start after switching over: carry the SQLite window across rather than beginning the day empty.
+    const seeded = loaded ? 0 : firestore.archive.saveAds(store.recentAds(policy.hours * 3_600_000));
+    const a = firestore.archive.stats();
+    console.log(`Firestore archive loaded from project ${firestore.projectId}: ${loaded} ads${seeded ? ` (seeded ${seeded} from SQLite)` : ''}, back ${a.minutes} min.`);
+  }
   const client = new Client({ intents: [GatewayIntentBits.Guilds], allowedMentions: { parse: [] } });
   const trading = new TradingService(store);
   const providers = new Providers(undefined, (owner, viewer, maxAgeMs) => trading.inventory(owner, viewer, maxAgeMs));
-  const search = new SearchService(providers, env.MAX_SELLERS_PER_SEARCH, store);
+  const search = new SearchService(providers, env.MAX_SELLERS_PER_SEARCH, archive);
   // The API holds about three minutes of ads, so polling every 60 s captures every ad with margin even without the trades page.
   let lastCollectedAt = 0;
   const collect = async () => {
     try {
-      const added = store.saveAds((await providers.ads()).data);
+      const added = archive.saveAds((await providers.ads()).data);
       // Roll the window forward on the same beat the ads arrive on, so the newest always displace the oldest.
-      store.prune();
+      archive.prune();
+      if (archive !== store) store.prune();
       const now = Date.now();
       if (lastCollectedAt && now - lastCollectedAt > 170_000) console.warn(`Ad feed gap: ${Math.round((now - lastCollectedAt) / 1000)} s between successful polls; some ads may be missing.`);
       lastCollectedAt = now;
       if (added) {
-        const a = store.stats();
-        console.log(`Archived ${added} new trade ads (${a.count} of max ${a.maxAds} kept, back ${a.minutes} min, ${(a.bytes / 1048576).toFixed(1)} MB).`);
+        const a = archive.stats();
+        console.log(`Archived ${added} new trade ads (${a.count} of max ${a.maxAds} kept, back ${a.minutes} min, ${(a.bytes / 1048576).toFixed(1)} MB ${a.storage === 'firestore' ? 'in Firestore' : 'on disk'}).`);
       }
     } catch (error) { console.error('Ad collection failed:', error instanceof Error ? error.message : 'Unknown error'); }
   };
@@ -86,11 +100,25 @@ async function main() {
     await recipient.send({ ...inventoryChangeMessage(user, change, { avatar, card: files.length > 0, checkedAt }), files });
     console.log(`Inventory DM sent to ${user.discordId}: ${change.removed.length} out, ${change.added.length} in.`);
   });
-  const health = startHealthServer(env.HEALTH_PORT, () => {
-    const archive = store.stats();
-    return { discord: client.isReady(), lastScanAt: monitor.lastCompletedAt, archive };
-  });
-  client.once(Events.ClientReady, ready => { console.log(`Tradefinder connected as ${ready.user.tag}`); void ensureIcons(client); void collect(); monitor.start(); });
+  const report = (): HealthReport => ({ discord: client.isReady(), lastScanAt: monitor.lastCompletedAt, archive: archive.stats(), archiveError: firestore?.archive.lastError ?? null });
+  const health = startHealthServer(env.HEALTH_PORT, report);
+  // The heartbeat is the same report, written to Firestore each minute so the console shows the bot is alive.
+  const beat = async () => { try { await firestore?.heartbeat.beat(report(), { archiveError: firestore.archive.lastError }); } catch (error) { console.error('Heartbeat failed:', error instanceof Error ? error.message : 'Unknown error'); } };
+  const pulse = firestore ? setInterval(() => { void beat(); }, 60_000) : undefined;
+  // The watchdog covers hosts with no health-check probe: a gateway that stays down or scans that stop finishing end the
+  // process, and the supervisor (compose's restart policy, systemd, the platform) brings it straight back.
+  const staleMs = env.WATCHDOG_MINUTES * 60_000;
+  let lastReadyAt = Date.now();
+  const watchdog = staleMs ? setInterval(() => {
+    const now = Date.now();
+    if (client.isReady()) lastReadyAt = now;
+    const gatewayDown = now - lastReadyAt > staleMs;
+    const scansStalled = monitor.lastCompletedAt !== null && now - monitor.lastCompletedAt > staleMs + env.POLL_INTERVAL_SECONDS * 1000;
+    if (!gatewayDown && !scansStalled) return;
+    console.error(`Watchdog: ${gatewayDown ? 'gateway down' : 'scans stalled'} for over ${env.WATCHDOG_MINUTES} min; exiting for restart.`);
+    void stop(1);
+  }, 60_000) : undefined;
+  client.once(Events.ClientReady, ready => { console.log(`Tradefinder connected as ${ready.user.tag}`); lastReadyAt = Date.now(); void ensureIcons(client); void collect(); monitor.start(); void beat(); });
   client.on(Events.InteractionCreate, interaction => {
     const task = interaction.isChatInputCommand() ? bot.handle(interaction)
       : interaction.isMessageComponent() || interaction.isModalSubmit() ? bot.component(interaction) : undefined;
@@ -98,19 +126,21 @@ async function main() {
   });
   client.on(Events.Error, error => console.error('Discord client error:', error.name));
   let closing = false;
-  const stop = async () => {
+  const stop = async (code = 0) => {
     if (closing) return;
     closing = true;
     console.log('Stopping trade monitor…');
-    clearInterval(collector);
+    clearInterval(collector); clearInterval(pulse); clearInterval(watchdog);
     health?.close();
     await monitor.stop();
     client.destroy(); store.close();
-    process.exit(0);
+    // The last poll's buckets may still be in flight; give them a moment rather than dropping them on the floor.
+    if (firestore) await Promise.race([firestore.archive.settle().then(() => code ? undefined : firestore.heartbeat.stopped()), new Promise(r => setTimeout(r, 10_000))]).catch(() => undefined);
+    process.exit(code);
   };
   process.once('SIGINT', () => { void stop(); }); process.once('SIGTERM', () => { void stop(); });
   try { await client.login(env.DISCORD_TOKEN); }
-  catch { clearInterval(collector); health?.close(); await monitor.stop(); client.destroy(); store.close(); throw new Error('Discord login failed. Check DISCORD_TOKEN in .env.'); }
+  catch { clearInterval(collector); clearInterval(pulse); clearInterval(watchdog); health?.close(); await monitor.stop(); client.destroy(); store.close(); throw new Error('Discord login failed. Check DISCORD_TOKEN in .env.'); }
 }
 void main().catch(error => {
   // Do not dump request objects, environment variables or authentication headers.

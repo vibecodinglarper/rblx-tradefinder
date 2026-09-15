@@ -7,3 +7,5 @@ data/
 *.log
 coverage/
 docs/screenshots/html/
+secrets/
+*service-account*.json

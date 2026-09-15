@@ -45,12 +45,12 @@ export class Store {
     if (mode === 0) { this.db.exec('PRAGMA auto_vacuum = INCREMENTAL'); this.db.exec('VACUUM'); }
   }
   /** Where the archive lives and how much of it there is, for the panels that report on it. */
-  stats(now = Date.now()): { count: number; minutes: number; perHour: number; bytes: number; retentionHours: number; maxAds: number } {
+  stats(now = Date.now()): { count: number; minutes: number; perHour: number; bytes: number; retentionHours: number; maxAds: number; storage: 'disk' } {
     const { count, minutes } = this.adCoverage(now);
     const pages = (this.db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count;
     const size = (this.db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
     return { count, minutes, perHour: minutes ? Math.round(count / (minutes / 60)) : 0,
-      bytes: pages * size, retentionHours: this.archive.hours, maxAds: this.archive.maxAds };
+      bytes: pages * size, retentionHours: this.archive.hours, maxAds: this.archive.maxAds, storage: 'disk' };
   }
   /** Rolimons only serves the last few minutes of ads, so every poll is archived; searches then screen the whole archive. */
   saveAds(ads: TradeAd[]): number {
