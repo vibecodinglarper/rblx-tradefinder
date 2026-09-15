@@ -1,11 +1,11 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { SearchService } from '../src/search.js';
-import { recommendationMessage } from '../src/presentation.js';
+import { alertMessage } from '../src/presentation.js';
 import { fixtureProvider, profile } from '../test/fixtures.js';
 
 const result = await new SearchService(fixtureProvider()).search(profile());
 const recommendation = result.recommendations[0]!;
-const payload = recommendationMessage(recommendation);
+const payload = alertMessage(recommendation);
 mkdirSync('data', { recursive: true });
 writeFileSync('data/demo-recommendation.json', JSON.stringify({
   ...payload, embeds: payload.embeds.map(e => e.toJSON()), components: payload.components.map(c => c.toJSON()),

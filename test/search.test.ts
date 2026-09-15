@@ -36,6 +36,25 @@ test('finds target items from multiple sellers and enforces seller request cap',
   const capped = await new SearchService(provider, 1).search(user);
   assert.equal(capped.sellersChecked, 1); assert.equal(capped.candidateSellers, 2);
 });
+test('downgrade give-aways: several chosen items are searched one at a time and never combined, and each must be giveable', async () => {
+  const provider = fixtureProvider();
+  // The user owns 30 (110) and 10 (50). One seller offers 60+61 (121, +10% over item 30); another asks for exactly 30+10 in
+  // return for four items worth 176 (+10% over both together), which would pass as a "downgrade" if the two were combined.
+  provider.inventories.set(1, inventory(1, [30, 10]));
+  const parts = [[60, 60], [61, 61], [62, 44], [63, 44], [64, 44], [65, 44]] as const;
+  for (const [id, value] of parts) provider.itemMap.set(id, { ...provider.itemMap.get(40)!, id, name: `Part ${id}`, acronym: `P${id}`, value, rap: value });
+  provider.adList = [ad({ id: 801, userId: 21, offering: [60, 61], requesting: [] }), ad({ id: 802, userId: 22, offering: [62, 63, 64, 65], requesting: [30, 10] })];
+  provider.inventories.set(21, inventory(21, [60, 61])); provider.inventories.set(22, inventory(22, [62, 63, 64, 65]));
+  const user = profile(); const prefs = { ...user.preferences, mode: 'downgrade' as const };
+  const both = await new SearchService(provider).search(user, prefs, { giveOnly: [30, 10] });
+  assert.ok(both.recommendations.length >= 1);
+  assert.ok(both.recommendations.every(r => r.give.length === 1 && [30, 10].includes(r.give[0]!.assetId)), 'each chosen item is given on its own');
+  assert.ok(both.recommendations.some(r => r.ad.userId === 21 && r.give[0]!.assetId === 30));
+  assert.ok(!both.recommendations.some(r => r.ad.userId === 22 && r.receive.length === 4), 'the ad asking for both items together is not a downgrade of either');
+  // Restricting to item 10 alone finds nothing, and asking to give an item the user cannot give is refused by name.
+  assert.equal((await new SearchService(provider).search(user, prefs, { giveOnly: [10] })).recommendations.length, 0);
+  await assert.rejects(new SearchService(provider).search(user, prefs, { giveOnly: [30, 40] }), /copy of \*\*Item 40\*\* to give/);
+});
 test('refuses snapshots that became stale during a scan', async () => {
   const provider = fixtureProvider(); provider.inventories.get(1)!.fetchedAt = Date.now() - 300_001;
   await assert.rejects(new SearchService(provider).search(profile()), /stale/);

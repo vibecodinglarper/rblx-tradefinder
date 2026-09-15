@@ -30,6 +30,19 @@ export const SHAPE_TARGET_PCT: Record<string, number> = { upgrade: -10, downgrad
 /** Lower is better: how far a trade sits from what its own shape is supposed to achieve. */
 export const shapeDistance = (r: { mode: string; valueGainPct: number }): number =>
   Math.abs(r.valueGainPct - (SHAPE_TARGET_PCT[r.mode] ?? 0));
+/** How a trade's value outcome reads at a glance: more than 1% either way is a gain or a loss, anything between is even. */
+export type Bucket = 'gain' | 'even' | 'loss';
+export const bucketOf = (r: Evaluation): Bucket => (r.valueGainPct > 1 ? 'gain' : r.valueGainPct >= -1 ? 'even' : 'loss');
+/** Alternates two lists (first of `a`, first of `b`, second of `a`, …) so neither crowds the other out of a shared budget. */
+export function interleave<T>(a: T[], b: T[]): T[] {
+  const out: T[] = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i], y = b[i];
+    if (x !== undefined) out.push(x);
+    if (y !== undefined) out.push(y);
+  }
+  return out;
+}
 /**
  * How small a trade is next to the best item the user owns, in powers of ten: 0 for trades around their top items,
  * 1 for a tenth of that, and so on. Hardly anyone wants to shuffle the bottom of their inventory, so this bands the
@@ -144,8 +157,6 @@ export function evaluate(give: PricedCopy[], receive: PricedCopy[], p: Preferenc
   if ([...give, ...receive].some(c => c.item.projected)) failures.push('Projected items are excluded from every calculation; their value is not what it appears.');
   if (receive.some(c => c.item.demand < p.minDemand)) failures.push(`Incoming demand is below ${p.minDemand}.`);
   // RAP is informational only: every decision above and the score below use value (or RAP standing in as value).
-  const unvalued = [...give, ...receive].filter(c => c.item.value === null).map(c => c.item.name);
-  if (unvalued.length) warnings.push(`No assigned Rolimons value for ${[...new Set(unvalued)].join(', ')}: RAP counts as the value.`);
   if (receive.some(c => c.item.projected)) warnings.push('Incoming projected item: RAP may be inflated.');
   if (receive.some(c => c.item.hyped)) warnings.push('Incoming item is marked hyped.');
   if (receive.some(c => c.item.rare)) warnings.push('Incoming rare item: liquidity and negotiated prices can vary.');

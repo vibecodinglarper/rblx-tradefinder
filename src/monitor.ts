@@ -1,10 +1,11 @@
 import { alertHourlyCap, UserError, type UserProfile } from './domain.js';
-import { alertKey, type Recommendation } from './engine.js';
+import { alertKey, interleave, type Recommendation } from './engine.js';
 import { diffInventory, type InventoryChange } from './changes.js';
 import type { SearchService } from './search.js';
 import type { Store } from './store.js';
 
-type Sender = (discordId: string, recommendation: Recommendation) => Promise<void>;
+/** `user` is the profile snapshot the recommendation was computed for, so a relink mid-send cannot rebind the offer. */
+type Sender = (discordId: string, recommendation: Recommendation, user: UserProfile) => Promise<void>;
 export type ChangeSender = (user: UserProfile, change: InventoryChange, checkedAt: number) => Promise<void>;
 const signature = (u: UserProfile) => JSON.stringify([u.robloxId, u.alerts, u.inventoryAlerts, u.preferences]);
 /** Discord 50007 = DMs blocked. */
@@ -54,13 +55,7 @@ export class Monitor {
         const checked = new Set<number>();
         // Downgrades are the harder shape to find and the one people ask for, so each batch leads with them and then
         // alternates, rather than letting a run of upgrades use up the whole budget.
-        const downs = result.recommendations.filter(r => r.mode === 'downgrade');
-        const others = result.recommendations.filter(r => r.mode !== 'downgrade');
-        const batch: Recommendation[] = [];
-        for (let n = 0; n < Math.max(downs.length, others.length); n++) {
-          if (downs[n]) batch.push(downs[n]!);
-          if (others[n]) batch.push(others[n]!);
-        }
+        const batch = interleave(result.recommendations.filter(r => r.mode === 'downgrade'), result.recommendations.filter(r => r.mode !== 'downgrade'));
         for (const r of batch) {
           if (sent >= budget || this.stopped || !this.unchanged(user)) break;
           // Same seller, same thing received (whatever you give for it) is one alert, and one per seller per scan.
@@ -74,7 +69,7 @@ export class Monitor {
           const fresh = await this.search.refresh(user, r);
           if (!fresh) continue;
           if (this.stopped || !this.unchanged(user)) break;
-          try { await this.send(user.discordId, fresh); }
+          try { await this.send(user.discordId, fresh, user); }
           catch (error) {
             deliveryFailed = true;
             const current = this.unchanged(user);

@@ -40,9 +40,9 @@ export function groupInventory(inventory: Inventory, items: Map<number, Item>): 
     const status = availability.get(e)!;
     // Status goes first so it remains visible even when a card has several other tags. With untradable copies gone,
     // a verified entry with nothing tradable is one whose every copy is on hold.
-    const label = status.unknown ? 'Tradability unknown' : status.tradable === e.quantity ? 'Tradable'
-      : status.tradable === 0 ? 'on hold' : `${status.tradable}/${e.quantity} tradable`;
-    e.tags.unshift(label);
+    // A stack that is partly on hold is described by its "N on hold" tag alone.
+    const label = status.unknown ? 'Tradability unknown' : status.tradable === e.quantity ? 'Tradable' : status.tradable === 0 ? 'on hold' : null;
+    if (label) e.tags.unshift(label);
     if (e.onHold && label !== 'on hold') e.tags.push(e.onHold === e.quantity ? 'on hold' : `${e.onHold} on hold`);
   }
   // Most valuable first; unpriced items last, then by name so the order is stable between pages.

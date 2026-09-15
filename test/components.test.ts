@@ -4,7 +4,7 @@ import type { MessageComponentInteraction, ModalSubmitInteraction } from 'discor
 import { Bot } from '../src/bot.js';
 import { Store } from '../src/store.js';
 import { SearchService } from '../src/search.js';
-import { findPanel, helpMessage, ids, itemsPanel, profitMessage, settingsMessage } from '../src/presentation.js';
+import { alertMessage, analysisMessage, findPanel, helpMessage, ids, itemsPanel, profitMessage, settingsMessage } from '../src/presentation.js';
 import { finderProvider, fixtureProvider, profile } from './fixtures.js';
 
 type Kind = 'button' | 'select' | 'modal';
@@ -84,10 +84,10 @@ test('link modal opens from a button and its submission tracks the account', asy
 test('recommendation buttons re-check the exchange and re-run the search', async () => {
   // Affordable on means the price-range question is already answered, so Find searches instead of asking.
   const store = new Store(':memory:'); const answered = profile(); answered.preferences.affordable = true; store.save(answered); const bot = new Bot(store, new SearchService(finderProvider()));
-  const result = await new SearchService(fixtureProvider()).search(profile());
-  const { recommendationMessage } = await import('../src/presentation.js');
-  const actions = customIds(recommendationMessage(result.recommendations[0]!, { alert: true }));
-  assert.ok(actions.some(id => id.startsWith('tf:recheck:')) && actions.includes('tf:alerts:off')); assert.ok(!actions.some(id => id.startsWith('tf:lock:')));
+  const rec = (await new SearchService(fixtureProvider()).search(profile())).recommendations[0]!;
+  // Re-check lives on the analysis panel; Stop alerts on the alert DM. Neither carries a lock button any more.
+  const actions = customIds(analysisMessage(rec, { id: rec.ad.userId, name: rec.ad.username }));
+  assert.ok(actions.some(id => id.startsWith('tf:recheck:')) && customIds(alertMessage(rec)).includes('tf:alerts:off')); assert.ok(!actions.some(id => id.startsWith('tf:lock:')));
   const recheck = component(actions.find(id => id.startsWith('tf:recheck:'))!); await bot.component(recheck.i);
   assert.match(json(recheck.last()?.body), /102 received − 100 given/);
   const again = component(ids.build('find', '-', '-', 1)); await bot.component(again.i);
@@ -183,9 +183,9 @@ test('inventory groups copies into quantities, pages through grid and text views
   const t = text.last()?.body as { embeds: { toJSON(): { description?: string } }[]; files: { name: string }[] };
   assert.deepEqual(t.files, []);
   const desc = t.embeds[0]!.toJSON().description!;
-  assert.match(desc, /\*\*3\.\*\* \[Roblox Only Hat\]\(.*\) · V 48 · RAP 48 · ✅ Tradable\n\*\*4\.\*\* \[Extra 100\]/); assert.doesNotMatch(desc, /RAP\)|value = RAP/);
-  assert.match(t.embeds[0]!.toJSON().description!, /\*\*1\.\*\* \[Anime Hair\]\(.*\) \*\*16x\*\* · V 50 · RAP 50 · ✅ 15\/16 tradable 💎 rare ⏳ 1 on hold/);
-  assert.doesNotMatch(t.embeds[0]!.toJSON().description!, /locked/); assert.match(t.embeds[0]!.toJSON().description!, /Item 999999\]\(.*\) · no price · ✅ Tradable ❔ unpriced/);
+  assert.match(desc, /\*\*3\.\*\* \[Roblox Only Hat\]\(.*\) · V 48 · RAP 48\n\*\*4\.\*\* \[Extra 100\]/); assert.doesNotMatch(desc, /RAP\)|value = RAP/);
+  assert.match(t.embeds[0]!.toJSON().description!, /\*\*1\.\*\* \[Anime Hair\]\(.*\) \*\*16x\*\* · V 50 · RAP 50 · 💎 rare ⏳ 1 on hold/);
+  assert.doesNotMatch(t.embeds[0]!.toJSON().description!, /locked/); assert.match(t.embeds[0]!.toJSON().description!, /Item 999999\]\(.*\) · no price · ❔ unpriced/);
   assert.match(json(t), /tf:inv:grid:0/);
   store.close();
 });
@@ -258,11 +258,13 @@ test('search results state how many ads were screened and how many offered the t
   assert.match(summary, /🟠 0 slight loss · 🟰 0 even · 🟢 1 slight gain/); assert.doesNotMatch(summary, /tf:tld/);
   assert.match(summary, /"thumbnail":\{"url":"https:\/\/tr\.rbxcdn\.com\/character\/2\.png"\}/, 'the seller card shows their character render');
   assert.doesNotMatch(summary, /more option/); assert.doesNotMatch(summary, /tf:view:items/, 'no Wanted & locked button on the finder');
-  assert.match(summary, /\\n🔁 \[Open the trade window with ExampleSeller\]\(https:\/\/www\.roblox\.com\/users\/2\/trade#tradefinder\?give=10,20&get=30\)/);
+  // The seller line names the trader; the trade-window link is the Trade with button, not repeated in the text.
+  assert.match(summary, /\*\*ExampleSeller\*\* · \[Profile\]\(https:\/\/www\.roblox\.com\/users\/2\/profile\)/); assert.doesNotMatch(summary, /Open the trade window/);
+  assert.match(summary, /"url":"https:\/\/www\.roblox\.com\/users\/2\/trade#tradefinder\?give=10,20&get=30"/);
   const page = component(ids.build('tl', 0)); await bot.component(page.i);
   assert.equal(page.calls[0]?.method, 'deferUpdate'); assert.match(json(page.last()?.body), /1 person you can trade with/);
   bot['results'].clear();
-  const expired = component(ids.build('tl', 0)); await bot.component(expired.i); assert.match(json(expired.last()?.body), /search has expired/);
+  const expired = component(ids.build('tl', 0)); await bot.component(expired.i); assert.match(json(expired.last()?.body), /Search expired/);
   store.close();
 });
 
@@ -353,7 +355,7 @@ test('the upgrade list pages five sellers at a time, orders slight losses before
   assert.match(page2, /"url":"https:\/\/www\.roblox\.com\/users\/13\/trade#tradefinder\?give=10,20&get=303"/);
   store.close();
 });
-test('downgrade mode gives one chosen item for a seller bundle worth about +10%, ranked closest to +10% first, and never touches projected items', async () => {
+test('downgrade mode gives each chosen item alone for a seller bundle worth about +10%, ranked closest to +10% first, and never touches projected items', async () => {
   const provider = fixtureProvider();
   // The user gives item 30 (value 110, they own one). Sellers offer pairs: 60+61 = 121 (+10%), 62+63 = 130 (+18%), 64+65 = 112 (+1.8%, below +5%), 66 projected + 67.
   provider.inventories.set(1, { userId: 1, fetchedAt: Date.now(), holdings: [{ assetId: 30, userAssetId: 100, onHold: false, tradable: true }, { assetId: 10, userAssetId: 101, onHold: false, tradable: true }] });
@@ -368,14 +370,22 @@ test('downgrade mode gives one chosen item for a seller bundle worth about +10%,
   const panel = component(ids.build('fq', 'mode', 'downgrade', '-', 3)); await bot.component(panel.i);
   const body = json(panel.last()?.body);
   assert.match(body, /Find trades · ⬇️ Downgrade/); assert.match(body, /tf:fq:give:downgrade:3/); assert.match(body, /"label":"Item 30"/); assert.match(body, /"disabled":true/, 'search stays disabled until an item is chosen');
+  assert.match(body, /"min_values":1,"max_values":2/, 'the give menu takes several of the user\'s two items');
   const chosen = component(ids.build('fq', 'give', 'downgrade', 3), 'select', { values: [ids.encode(30)] }); await bot.component(chosen.i);
   assert.match(json(chosen.last()?.body), new RegExp(`tf:find:downgrade:${ids.encode(30)}:3`));
-  const notOwned = component(ids.build('target', 'downgrade', 3, '-'), 'modal', { fields: { item: 'I20' } }); await bot.component(notOwned.i);
+  // Several picks ride in one custom ID and every one is named on the panel; typed lists work the same way.
+  const several = component(ids.build('fq', 'give', 'downgrade', 3), 'select', { values: [ids.encode(30), ids.encode(10)] }); await bot.component(several.i);
+  assert.match(json(several.last()?.body), new RegExp(`tf:find:downgrade:${ids.encodeList([30, 10])}:3`)); assert.match(json(several.last()?.body), /I give · 2 \(one per trade\)[^}]*Item 30, Item 10/);
+  const typed = component(ids.build('target', 'downgrade', 3, '-'), 'modal', { fields: { item: 'I10, I30' } }); await bot.component(typed.i);
+  assert.match(json(typed.last()?.body), /You will give \*\*Item 10\*\*[^.]*\*\*Item 30\*\*/);
+  const notOwned = component(ids.build('target', 'downgrade', 3, '-'), 'modal', { fields: { item: 'I30, I20' } }); await bot.component(notOwned.i);
   assert.match(json(notOwned.last()?.body), /do not have an available copy of \*\*Item 20\*\*/);
-  const search = component(ids.build('find', 'downgrade', ids.encode(30), 3)); await bot.component(search.i);
+  const search = component(ids.build('find', 'downgrade', ids.encodeList([30, 10]), 3)); await bot.component(search.i);
   const list = json(search.calls.find(c => c.method === 'editReply')?.body);
-  // 64+65 (+1.82%) is not worth downgrading for, and the projected pair never counts; both real offers survive.
-  assert.match(list, /2 people you can trade with to downgrade Item 30/);
+  // 64+65 (+1.82%) is not worth downgrading for, and the projected pair never counts; both real offers survive. Item 10
+  // (worth 50) finds no bundle, and it is never combined with item 30 into a two-item give.
+  assert.match(list, /2 people you can trade with to downgrade Item 30, Item 10/); assert.match(list, /any one of Item 30, Item 10/);
+  assert.doesNotMatch(list, /give=30,10|give=10,30/);
   const order = [...list.matchAll(/"title":"(\d)\. (🟢|🟰|🟠) ([+-][\d,]+) value \(([+-][\d.]+)%\)/g)].map(m => m[4]);
   assert.deepEqual(order, ['+10', '+18.18'], 'the profit a downgrade is aiming for comes first');
   assert.doesNotMatch(list, /Part 66|Part 67/, 'a bundle containing a projected item is never proposed');

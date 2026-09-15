@@ -1,26 +1,33 @@
 import {
-  AttachmentBuilder, MessageFlags, type AutocompleteInteraction, type ChatInputCommandInteraction,
+  AttachmentBuilder, MessageFlags, type ChatInputCommandInteraction, type InteractionEditReplyOptions,
   type MessageComponentInteraction, type ModalBuilder, type ModalSubmitInteraction,
 } from 'discord.js';
 import { effectiveValue, NotLinkedError, parseId, parsePreferences, UserError, visibleHoldings, type Item, type UserProfile } from './domain.js';
-import { affordableRange, evaluate, priced, REALISTIC_GAIN_PCT, selectCopies, totals, type Recommendation } from './engine.js';
+import { affordableRange, bucketOf, evaluate, interleave, priced, REALISTIC_GAIN_PCT, selectCopies, totals, type Recommendation } from './engine.js';
 import { groupInventory, paginate, PAGE_SIZE, type InventoryView } from './inventory.js';
 import { renderInventoryGrid, renderTradeCard } from './render.js';
 import { AmbiguousItemError, resolveItem } from './providers.js';
 import { formatMixedRange, formatRange, parseMixedRange, parseRange, type Range } from './amounts.js';
 import {
-  alertsMessage, analysisMessage, deleteConfirmMessage, deletedMessage, errorMessage, filtersModal, findPanel, helpMessage,
-  ids, inventoryAlertsMessage, inventoryMessage, itemModal, rangeModal, itemRuleModal, itemsPanel, linkMessage, linkModal, linkRequiredMessage, MAX_TARGETS, parseQuery, pickItemMessage, queryState,
-  profitMessage, searchFiltersModal, settingsMessage, targetModal, tradeListMessage, expiredSearchMessage, listPage, bucketOf, findMode,
+  alertsMessage, analysisMessage, connectModal, connectedMessage, deleteConfirmMessage, deletedMessage, disconnectedMessage, errorMessage,
+  expiredSearchMessage, filtersModal, findMode, findPanel, helpMessage, ids, inventoryAlertsMessage, inventoryMessage, itemModal, itemRuleModal,
+  itemsPanel, linkMessage, linkModal, linkRequiredMessage, listPage, MAX_TARGETS, parseQuery, pickItemMessage, profitMessage, queryFromArgs,
+  queryState, rangeModal, searchFiltersModal, settingsMessage, targetModal, tradeListMessage, tradeSentMessage, verificationMessage, verificationModal,
   type GiveChoice, type SearchQuery,
 } from './presentation.js';
 import type { SearchResult, SearchService } from './search.js';
+import { COMMAND_NAMES } from './commands.js';
 import type { Store } from './store.js';
 import { randomBytes } from 'node:crypto';
 import { TradingService, TradeVerificationRequired } from './trading.js';
-import { connectModal, connectedMessage, disconnectedMessage, tradeSentMessage, verificationMessage, verificationModal } from './presentation.js';
 
 type Replyable = ChatInputCommandInteraction | MessageComponentInteraction | ModalSubmitInteraction;
+type Component = MessageComponentInteraction | ModalSubmitInteraction;
+/** What an action hands back to be shown, or null when it already replied itself (a search draws its own list). */
+type Reply = InteractionEditReplyOptions | null;
+/** What an action gets: the interaction, the custom ID's trailing parts, and the tracked account, looked up on first use. */
+interface Action { i: Component; args: string[]; user: () => UserProfile }
+type Handler = (a: Action) => Reply | Promise<Reply>;
 /** Component actions that redraw the panel they were clicked on instead of posting a new message. */
 const IN_PLACE = new Set(['inv', 'tl', 'sfilters', 'pick', 'itemrule', 'unrule', 'view', 'alerts', 'invalerts', 'fq', 'target', 'filters', 'addwatch', 'unwatch', 'delete', 'range', 'alertrate']);
 /** Buttons that open a pop-up form. The form's submit custom ID is the action without the `modal` suffix. */
@@ -30,10 +37,18 @@ const MODALS: Record<string, (args: string[], user: () => UserProfile) => ModalB
   watchmodal: (_, user) => { user(); return itemModal(); },
   rulemodal: (_, user) => { user(); return itemRuleModal(); },
   targetmodal: (args, user) => { user(); return targetModal(args[0] ?? '-', args[1] ?? 3, args[2] ?? '-'); },
-  sfiltersmodal: (args, user) => searchFiltersModal(user(), queryState(parseQuery(...args as [string?, string?, string?]))),
+  sfiltersmodal: (args, user) => searchFiltersModal(user(), queryState(queryFromArgs(args))),
 };
-
-const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const unsupported = () => new UserError('This button is no longer supported. Run the command again.');
+/** Actions that only make sense as a submitted form or a menu pick; a stray button with the same verb is refused like any unknown action. */
+const submitted = (i: Component): ModalSubmitInteraction => { if (!i.isModalSubmit()) throw unsupported(); return i; };
+const picked = (i: Component): string[] => { if (!i.isStringSelectMenu()) throw unsupported(); return i.values; };
+/** Sending waits on Roblox; the wait notice replaces the panel until the result arrives. */
+const progress = (i: Component) => async (content: string) => { await i.editReply({ content, embeds: [], components: [] }); };
+const sent = (tradeId: number): Reply => ({ ...tradeSentMessage(tradeId), content: '' });
+/** Comma- or newline-separated form entries, trimmed and non-empty. */
+const entriesOf = (input: string) => input.split(/[,\n]+/).map(e => e.trim()).filter(Boolean);
+const itemLabel = (item: Item) => `**${item.name}**${item.acronym ? ` (${item.acronym})` : ''} · ID ${item.id}`;
 
 export class Bot {
   private busy = new Set<string>();
@@ -41,6 +56,9 @@ export class Bot {
   /** Latest finder result per user, so paging and details never re-run the search. */
   private results = new Map<string, { result: SearchResult; query: SearchQuery; at: number; token: string; robloxId: number }>();
   private static RESULT_TTL = 15 * 60_000;
+  /** Offers sent as alert DMs, keyed by the token in the DM's Place Trade button; bounded per user and by RESULT_TTL. */
+  private alertOffers = new Map<string, { offer: Recommendation; discordId: string; robloxId: number; at: number }>();
+  private static ALERTS_PER_USER = 20;
   constructor(private store: Store, private search: SearchService, private scanSeconds = 60, private trading = new TradingService(store)) {}
   private profile(id: string): UserProfile {
     const user = this.store.get(id);
@@ -55,13 +73,9 @@ export class Bot {
   private async itemNames(): Promise<Map<number, Item> | undefined> {
     try { return (await this.search.provider.items()).data; } catch { return undefined; }
   }
-  async autocomplete(i: AutocompleteInteraction): Promise<void> {
-    try {
-      const query = i.options.getFocused().trim().toLowerCase();
-      const items = await this.search.provider.items();
-      const matches = [...items.data.values()].filter(item => String(item.id).startsWith(query) || item.name.toLowerCase().includes(query) || item.acronym.toLowerCase().includes(query));
-      await i.respond(matches.slice(0, 25).map(item => ({ name: `${item.name} ${item.acronym ? `(${item.acronym}) ` : ''}— ${item.id}`.slice(0, 100), value: String(item.id) })));
-    } catch { try { await i.respond([]); } catch { /* Expired autocomplete needs no public error. */ } }
+  /** Item thumbnails for rendered cards; an outage leaves the squares blank rather than failing the panel. */
+  private async thumbnails(assetIds: number[]): Promise<Map<number, Buffer>> {
+    return await this.search.provider.thumbnails?.(assetIds).catch(() => new Map<number, Buffer>()) ?? new Map<number, Buffer>();
   }
   private async fail(i: Replyable, error: unknown): Promise<void> {
     const expected = error instanceof UserError;
@@ -71,27 +85,26 @@ export class Bot {
     try { if (i.deferred || i.replied) await i.editReply(payload); else await i.reply({ ...payload, flags: MessageFlags.Ephemeral }); } catch { /* Interaction expired. */ }
   }
   async handle(i: ChatInputCommandInteraction): Promise<void> {
-    if (!['trade', 'connect', 'disconnect', 'find'].includes(i.commandName)) return;
+    if (!COMMAND_NAMES.has(i.commandName)) return;
     if (this.busy.has(i.user.id)) { await i.reply({ ...errorMessage('Your previous command is still running.'), flags: MessageFlags.Ephemeral }); return; }
     this.busy.add(i.user.id);
     try {
       if (i.commandName === 'connect') { this.trading.available(); await i.showModal(connectModal()); return; }
       if (i.commandName === 'disconnect') {
         await i.deferReply({ flags: MessageFlags.Ephemeral });
-        this.store.disconnect(i.user.id); this.results.delete(i.user.id);
+        this.store.disconnect(i.user.id); this.forgetOffers(i.user.id);
         this.trading.cancelVerification(i.user.id);
         await i.editReply(disconnectedMessage()); return;
       }
-      const sub = i.commandName === 'find' ? 'find' : i.options.getSubcommand();
       // Forms must be the first response to an interaction, so they are shown before any deferral.
-      if (sub === 'link') { await i.showModal(linkModal()); return; }
+      if (i.commandName === 'link') { await i.showModal(linkModal()); return; }
       await i.deferReply({ flags: MessageFlags.Ephemeral });
       await this.execute(i);
     } catch (error) { await this.fail(i, error); }
     finally { this.busy.delete(i.user.id); }
   }
   /** Buttons, select menus and modals. Every custom ID is prefixed `tf:`; anything else is ignored. */
-  async component(i: MessageComponentInteraction | ModalSubmitInteraction): Promise<void> {
+  async component(i: Component): Promise<void> {
     const parsed = ids.parse(i.customId);
     if (!parsed) return;
     if (this.busy.has(i.user.id)) { await i.reply({ ...errorMessage('Your previous command is still running.'), flags: MessageFlags.Ephemeral }); return; }
@@ -137,7 +150,7 @@ export class Bot {
   private needsRange(discordId: string, args: string[]): boolean {
     const user = this.store.get(discordId);
     if (!user || user.preferences.affordable || user.preferences.targetIds.length) return false;
-    const query = parseQuery(...args as [string?, string?, string?]);
+    const query = queryFromArgs(args);
     return findMode(query) !== 'downgrade' && !query.targetIds.length;
   }
   /**
@@ -153,201 +166,237 @@ export class Bot {
     if (n < min || n > max) throw new UserError(`**${label}** must be between ${min} and ${max}; you entered \`${typed.slice(0, 20)}\`.`);
     return n;
   }
-  private async act(i: MessageComponentInteraction | ModalSubmitInteraction, action: string, args: string[]) {
-    if (action === 'verify' && i.isModalSubmit()) {
-      const tradeId = await this.trading.verifyAndPlace(i.user.id, args[0] ?? '', i.fields.getTextInputValue('code'), async content => {
-        await i.editReply({ content, embeds: [], components: [] });
-      });
-      return { ...tradeSentMessage(tradeId), content: '' };
-    }
-    if (action === 'connect' && i.isModalSubmit()) {
-      const account = await this.trading.connect(i.user.id, i.fields.getTextInputValue('cookie'));
-      this.results.delete(i.user.id); this.lastSearch.delete(i.user.id);
+  /** Runs the component action named by a custom ID; anything not in the table is a button from an older build. */
+  private act(i: Component, action: string, args: string[]): Reply | Promise<Reply> {
+    const handler = this.actions[action];
+    if (!handler) throw unsupported();
+    let owner: UserProfile | undefined;
+    return handler({ i, args, user: () => (owner ??= this.profile(i.user.id)) });
+  }
+  /** Component actions by the verb in their custom ID. Only `verify`, `connect`, `link` and `view help` work without a tracked account. */
+  private readonly actions: Record<string, Handler> = {
+    verify: async ({ i, args }) => sent(await this.trading.verifyAndPlace(i.user.id, args[0] ?? '', submitted(i).fields.getTextInputValue('code'), progress(i))),
+    connect: async ({ i }) => {
+      const account = await this.trading.connect(i.user.id, submitted(i).fields.getTextInputValue('cookie'));
+      this.forgetOffers(i.user.id); this.lastSearch.delete(i.user.id);
       return connectedMessage(account);
-    }
-    if (action === 'link' && i.isModalSubmit()) return this.link(i.user.id, i.fields.getTextInputValue('user').trim(), i.fields.getTextInputValue('wanted'));
-    if (action === 'view') {
-      if (args[0] === 'help') return helpMessage();
-      const user = this.profile(i.user.id);
-      if (args[0] === 'profit') return profitMessage(user, await this.itemNames());
-      if (args[0] === 'settings') return this.settings(user);
-      if (args[0] === 'alerts') return this.alerts(user);
-      if (args[0] === 'inventory') return this.inventory(user);
-      if (args[0] === 'items') return itemsPanel(user, await this.itemNames());
-    }
-    const user = this.profile(i.user.id);
-    if (action === 'place') {
-      const cached = this.results.get(user.discordId);
-      if (!cached || cached.token !== args[0] || cached.robloxId !== user.robloxId || Date.now() - cached.at > Bot.RESULT_TTL) {
-        throw new UserError('This offer has expired or belongs to another search. Run /find trades again.');
+    },
+    link: ({ i }) => { const form = submitted(i); return this.link(i.user.id, form.fields.getTextInputValue('user').trim(), form.fields.getTextInputValue('wanted')); },
+    view: ({ args, user }) => this.view(args[0] ?? '', user),
+    // Place Trade on the trade list: the token must belong to this user's latest search, for the same account, and be fresh.
+    place: async ({ i, args, user }) => {
+      const owner = user();
+      const cached = this.results.get(owner.discordId);
+      if (!cached || cached.token !== args[0] || cached.robloxId !== owner.robloxId || Date.now() - cached.at > Bot.RESULT_TTL) {
+        throw new UserError('This offer has expired or belongs to another search. Run /trade again.');
       }
       const index = args[1] && /^\d+$/.test(args[1]) ? Number(args[1]) : -1;
       const offer = listPage(cached.result, 0).entries.find(e => e.index === index)?.best;
-      if (!offer || args.length !== 2) throw new UserError('This offer is no longer available. Run /find trades again.');
-      const tradeId = await this.trading.place(user, offer, cached.at + Bot.RESULT_TTL, async content => {
-        await i.editReply({ content, embeds: [], components: [] });
-      });
-      return { ...tradeSentMessage(tradeId), content: '' };
-    }
-    if (action === 'inv') return this.inventory(user, args[0] === 'text' ? 'text' : 'grid', Number(args[1]) || 0);
-    if (action === 'tl') {
-      const cached = this.results.get(user.discordId);
-      if (!cached || Date.now() - cached.at > Bot.RESULT_TTL) { this.results.delete(user.discordId); return expiredSearchMessage(); }
-      if (cached.robloxId !== user.robloxId) { this.results.delete(user.discordId); return expiredSearchMessage(); }
+      if (!offer || args.length !== 2) throw new UserError('This offer is no longer available. Run /trade again.');
+      return sent(await this.trading.place(owner, offer, cached.at + Bot.RESULT_TTL, progress(i)));
+    },
+    // Place Trade on an alert DM: the token must be this user's, for the account the alert was found for, and fresh.
+    placealert: async ({ i, args, user }) => {
+      const owner = user();
+      const alert = this.alertOffers.get(args[0] ?? '');
+      if (!alert || args.length !== 1 || alert.discordId !== owner.discordId || alert.robloxId !== owner.robloxId || Date.now() - alert.at > Bot.RESULT_TTL) {
+        throw new UserError('This alert has expired or belongs to another account. Wait for the next alert or run /trade.');
+      }
+      return sent(await this.trading.place(owner, alert.offer, alert.at + Bot.RESULT_TTL, progress(i)));
+    },
+    inv: ({ args, user }) => this.inventory(user(), args[0] === 'text' ? 'text' : 'grid', Number(args[1]) || 0),
+    tl: ({ args, user }) => {
+      const owner = user();
+      const cached = this.results.get(owner.discordId);
+      if (!cached || cached.robloxId !== owner.robloxId || Date.now() - cached.at > Bot.RESULT_TTL) { this.results.delete(owner.discordId); return expiredSearchMessage(); }
       return this.tradeList(cached.result, cached.query, Number(args[0]) || 0, cached.token);
-    }
-    if (action === 'sfilters' && i.isModalSubmit()) {
-      const updated = { ...user.preferences };
-      updated.maxAdAgeMinutes = Bot.number(i, 'maxAdAgeMinutes', 'Max ad age', 1, 1440);
+    },
+    sfilters: ({ i, args, user }) => { const owner = user(); return this.saveSearchFilters(submitted(i), owner, args); },
+    itemrule: async ({ i, user }) => {
+      const owner = user(); const form = submitted(i);
       const items = (await this.search.provider.items()).data;
-      const down = parseMixedRange(i.fields.getTextInputValue('downgradeRange'), items);
-      updated.downgradeProfitMin = down.min; updated.downgradeProfitMax = down.max;
-      const up = parseMixedRange(i.fields.getTextInputValue('upgradeRange'), items);
-      updated.upgradeOverpayMin = up.min; updated.upgradeOverpayMax = up.max;
-      const receive = parseRange(i.fields.getTextInputValue('receiveRange'), items);
-      updated.minReceiveValue = receive.min; updated.maxReceiveValue = receive.max;
-      // Typing a range is a clear wish to use it, so it switches the filter on.
-      if (receive.min !== null || receive.max !== null) updated.affordable = true;
-      user.preferences = parsePreferences(updated); this.store.save(user);
-      const parts = [down.min || down.max ? `Downgrade profit ${formatMixedRange(down)}` : '', up.min || up.max ? `Upgrade overpay ${formatMixedRange(up)}` : '', receive.min !== null || receive.max !== null ? `Any item worth ${formatRange(receive)}` : ''].filter(Boolean);
-      return this.panel(parseQuery(...args as [string?, string?, string?]), user, `✅ Filters saved.${parts.length ? ` ${parts.join(' · ')}.` : ''} They also apply to alerts.`);
-    }
-    if (action === 'itemrule' && i.isModalSubmit()) {
-      const items = (await this.search.provider.items()).data;
-      const range = parseRange(i.fields.getTextInputValue('range'), items);
-      try { return await this.setRule(user, resolveItem(i.fields.getTextInputValue('item'), items).id, range); }
+      const range = parseRange(form.fields.getTextInputValue('range'), items);
+      try { return await this.setRule(owner, resolveItem(form.fields.getTextInputValue('item'), items).id, range); }
       catch (error) { if (error instanceof AmbiguousItemError) return pickItemMessage(error.query, error.matches, ['itemrule', range.min ?? 'x', range.max ?? 'x']); throw error; }
-    }
-    if (action === 'unrule' && i.isStringSelectMenu()) {
-      const value = i.values[0] ?? '';
-      if (value === 'all') { user.preferences.itemRules = {}; this.store.save(user); return itemsPanel(user, await this.itemNames(), '🧹 Removed every per-item profit rule.'); }
-      return this.setRule(user, ids.decode(value), { min: null, max: null });
-    }
-    if (action === 'delete') {
+    },
+    unrule: async ({ i, user }) => {
+      const owner = user(); const value = picked(i)[0] ?? '';
+      if (value === 'all') { owner.preferences.itemRules = {}; this.store.save(owner); return itemsPanel(owner, await this.itemNames(), '🧹 Removed every per-item profit rule.'); }
+      return this.setRule(owner, ids.decode(value), { min: null, max: null });
+    },
+    delete: ({ args, user }) => {
+      const owner = user();
       if (args[0] !== 'yes') return deleteConfirmMessage();
-      this.store.forget(user.discordId); this.lastSearch.delete(user.discordId); this.results.delete(user.discordId);
-      this.trading.cancelVerification(user.discordId);
+      this.store.forget(owner.discordId); this.lastSearch.delete(owner.discordId); this.forgetOffers(owner.discordId);
+      this.trading.cancelVerification(owner.discordId);
       return deletedMessage();
-    }
-    if (action === 'fq') {
+    },
+    fq: ({ i, args, user }) => {
+      const owner = user();
       const [field, ...rest] = args;
-      const values = i.isStringSelectMenu() ? i.values : [];
       // Choosing "any" alongside specific items means the specific items.
-      const picked = values.filter(v => v !== '-');
-      if (field === 'afford') { user.preferences.affordable = !user.preferences.affordable; this.store.save(user); }
-      const query = field === 'mode' || field === 'afford' ? parseQuery(rest[0], rest[1], rest[2])
-        : field === 'target' ? parseQuery(rest[0], picked.length ? picked.join(',') : '-', rest[1])
-        : field === 'give' ? parseQuery(rest[0], picked[0] ?? '-', rest[1])
-        : parseQuery(...rest as [string?, string?, string?]);
-      return this.panel(query, user);
-    }
-    if (action === 'range' && i.isModalSubmit()) {
-      const range = parseRange(i.fields.getTextInputValue('range'), (await this.search.provider.items()).data);
-      user.preferences = parsePreferences({ ...user.preferences, minReceiveValue: range.min, maxReceiveValue: range.max, affordable: true });
-      this.store.save(user);
-      const custom = range.min !== null || range.max !== null;
+      const chosen = (i.isStringSelectMenu() ? i.values : []).filter(v => v !== '-');
+      if (field === 'afford') { owner.preferences.affordable = !owner.preferences.affordable; this.store.save(owner); }
+      // Targets (upgrade) and give-aways (downgrade) are both multi-picks carried the same way.
+      const query = field === 'mode' || field === 'afford' ? queryFromArgs(rest)
+        : field === 'target' || field === 'give' ? parseQuery(rest[0], chosen.length ? chosen.join(',') : '-', rest[1])
+        : queryFromArgs(rest);
+      return this.panel(query, owner);
+    },
+    range: async ({ i, args, user }) => {
+      const owner = user(); const form = submitted(i);
+      const range = parseRange(form.fields.getTextInputValue('range'), (await this.search.provider.items()).data);
+      owner.preferences = parsePreferences({ ...owner.preferences, minReceiveValue: range.min, maxReceiveValue: range.max, affordable: true });
+      this.store.save(owner);
       const query = parseQuery(args[0], '-', args[1]);
       // Asked from the Find button: the answer is the last thing the search needed, so run it rather than bouncing back.
-      if (args[2] === 'find') { await this.find(i, user, query); return null; }
-      return this.panel(query, user, custom ? `💸 Looking for any item worth **${formatRange(range)}**.` : '💸 Looking for any item your items can afford.');
-    }
-    if (action === 'target' && i.isModalSubmit()) return this.setTarget(user, i.fields.getTextInputValue('item'), args);
-    if (action === 'pick' && i.isStringSelectMenu()) {
+      if (args[2] === 'find') { await this.find(i, owner, query); return null; }
+      const custom = range.min !== null || range.max !== null;
+      return this.panel(query, owner, custom ? `💸 Looking for any item worth **${formatRange(range)}**.` : '💸 Looking for any item your items can afford.');
+    },
+    target: ({ i, args, user }) => { const owner = user(); return this.setTarget(owner, submitted(i).fields.getTextInputValue('item'), args); },
+    // A choice from the "which item did you mean" menu completes whichever action asked the question.
+    pick: ({ i, args, user }) => {
+      const owner = user();
       const [kind, ...rest] = args;
-      const id = String(ids.decode(i.values[0] ?? ''));
-      if (kind === 'addwatch') return this.editList(user, id, false);
-      if (kind === 'target') return this.setTarget(user, id, rest, true);
-      if (kind === 'itemrule') { const num = (s?: string) => (s === undefined || s === 'x' ? null : Number(s)); return this.setRule(user, Number(id), { min: num(rest[0]), max: num(rest[1]) }); }
-    }
-    if (action === 'filters' && i.isModalSubmit()) {
+      const id = String(ids.decode(picked(i)[0] ?? ''));
+      if (kind === 'addwatch') return this.editList(owner, id, false);
+      if (kind === 'target') return this.setTarget(owner, id, rest, true);
+      if (kind === 'itemrule') { const num = (s?: string) => (s === undefined || s === 'x' ? null : Number(s)); return this.setRule(owner, Number(id), { min: num(rest[0]), max: num(rest[1]) }); }
+      throw unsupported();
+    },
+    filters: async ({ i, user }) => {
+      const owner = user(); const form = submitted(i);
       // The form asks for the loss you accept as a positive number; it is stored as a negative minimum gain. Gains are never capped.
-      const loss = Bot.number(i, 'maxLossPct', 'Loss I will accept', 0, 50);
-      const maxAdAgeMinutes = Bot.number(i, 'maxAdAgeMinutes', 'Max ad age', 1, 1440);
-      user.preferences = parsePreferences({ ...user.preferences, minValueGainPct: -loss, maxValueGainPct: null, maxAdAgeMinutes });
-      this.store.save(user);
-      return profitMessage(user, await this.itemNames(), '✅ Profit filters updated.');
-    }
-    if (action === 'addwatch' && i.isModalSubmit()) return this.addMany(user, i.fields.getTextInputValue('item'));
-    if (action === 'unwatch' && i.isStringSelectMenu()) {
-      if (i.values.includes('all')) return this.editList(user, 'all', true);
-      return this.removeMany(user, i.values.map(v => ids.decode(v)));
-    }
-    if (action === 'alerts') return this.setAlerts(user, args[0] === 'on');
-    if (action === 'alertrate' && i.isStringSelectMenu()) {
-      user.preferences = parsePreferences({ ...user.preferences, alertsPerScan: Number(i.values[0]) }); this.store.save(user);
-      const n = user.preferences.alertsPerScan;
-      return this.alerts(user, `📨 Sending up to **${n}** trade${n === 1 ? '' : 's'} per check.${user.alerts ? '' : ' Turn alerts on to start receiving them.'}`);
-    }
-    if (action === 'invalerts') return this.setInventoryAlerts(user, args[0] === 'on');
-    if (action === 'find') { await this.find(i, user, parseQuery(...args as [string?, string?, string?])); return null; }
-    if (action === 'recheck') {
+      const loss = Bot.number(form, 'maxLossPct', 'Loss I will accept', 0, 50);
+      const maxAdAgeMinutes = Bot.number(form, 'maxAdAgeMinutes', 'Max ad age', 1, 1440);
+      owner.preferences = parsePreferences({ ...owner.preferences, minValueGainPct: -loss, maxValueGainPct: null, maxAdAgeMinutes });
+      this.store.save(owner);
+      return profitMessage(owner, await this.itemNames(), '✅ Profit filters updated.');
+    },
+    addwatch: ({ i, user }) => { const owner = user(); return this.addMany(owner, submitted(i).fields.getTextInputValue('item')); },
+    unwatch: ({ i, user }) => {
+      const owner = user(); const values = picked(i);
+      if (values.includes('all')) return this.editList(owner, 'all', true);
+      return this.removeMany(owner, values.map(v => ids.decode(v)));
+    },
+    alerts: ({ args, user }) => this.setAlerts(user(), args[0] === 'on'),
+    alertrate: ({ i, user }) => {
+      const owner = user(); const values = picked(i);
+      owner.preferences = parsePreferences({ ...owner.preferences, alertsPerScan: Number(values[0]) }); this.store.save(owner);
+      const n = owner.preferences.alertsPerScan;
+      return this.alerts(owner, `📨 Sending up to **${n}** trade${n === 1 ? '' : 's'} per check.${owner.alerts ? '' : ' Turn alerts on to start receiving them.'}`);
+    },
+    invalerts: ({ args, user }) => this.setInventoryAlerts(user(), args[0] === 'on'),
+    find: async ({ i, args, user }) => { await this.find(i, user(), queryFromArgs(args)); return null; },
+    recheck: ({ args, user }) => {
+      const owner = user();
       const [partner = '', give = '', receive = ''] = args;
-      return this.recheck(user, String(ids.decode(partner)), ids.decodeList(give), ids.decodeList(receive));
-    }
-    throw new UserError('This button is no longer supported. Run the command again.');
+      return this.recheck(owner, String(ids.decode(partner)), ids.decodeList(give), ids.decodeList(receive));
+    },
+  };
+  /** The panels reachable from navigation buttons and their slash commands. Help is the only one that needs no account. */
+  private async view(name: string, user: () => UserProfile): Promise<NonNullable<Reply>> {
+    if (name === 'help') return helpMessage();
+    const owner = user();
+    if (name === 'profit') return profitMessage(owner, await this.itemNames());
+    if (name === 'settings') return this.settings(owner);
+    if (name === 'alerts') return this.alerts(owner);
+    if (name === 'inventory') return this.inventory(owner);
+    if (name === 'items') return itemsPanel(owner, await this.itemNames());
+    throw unsupported();
   }
   private async execute(i: ChatInputCommandInteraction): Promise<void> {
-    const sub = i.commandName === 'find' ? 'find' : i.options.getSubcommand();
-    if (sub === 'help') { await i.editReply(helpMessage()); return; }
-    const user = this.profile(i.user.id);
-    const items = () => this.itemNames();
-    switch (sub) {
-      case 'profit': await i.editReply(profitMessage(user, await items())); return;
-      case 'watch': await i.editReply(itemsPanel(user, await items())); return;
-      case 'alerts': await i.editReply(this.alerts(user)); return;
-      case 'settings': await i.editReply(await this.settings(user)); return;
-      case 'inventory': await i.editReply(await this.inventory(user)); return;
-      case 'find': await i.editReply(await this.panel({ mode: null, targetIds: [], results: 3 }, user)); return;
-      case 'delete': await i.editReply(deleteConfirmMessage()); return;
-      default: throw new UserError('Unknown command. Use /trade help.');
-    }
+    const user = () => this.profile(i.user.id);
+    if (i.commandName === 'trade') { await i.editReply(await this.panel({ mode: null, targetIds: [], results: 3 }, user())); return; }
+    if (i.commandName === 'delete') { user(); await i.editReply(deleteConfirmMessage()); return; }
+    await i.editReply(await this.view(i.commandName === 'watch' ? 'items' : i.commandName, user));
+  }
+  /** The finder's search filters form: shape windows, the receive range and ad age, all saved together. */
+  private async saveSearchFilters(form: ModalSubmitInteraction, user: UserProfile, args: string[]) {
+    const updated = { ...user.preferences };
+    updated.maxAdAgeMinutes = Bot.number(form, 'maxAdAgeMinutes', 'Max ad age', 1, 1440);
+    const items = (await this.search.provider.items()).data;
+    const down = parseMixedRange(form.fields.getTextInputValue('downgradeRange'), items);
+    updated.downgradeProfitMin = down.min; updated.downgradeProfitMax = down.max;
+    const up = parseMixedRange(form.fields.getTextInputValue('upgradeRange'), items);
+    updated.upgradeOverpayMin = up.min; updated.upgradeOverpayMax = up.max;
+    const receive = parseRange(form.fields.getTextInputValue('receiveRange'), items);
+    updated.minReceiveValue = receive.min; updated.maxReceiveValue = receive.max;
+    // Typing a range is a clear wish to use it, so it switches the filter on.
+    const typedRange = receive.min !== null || receive.max !== null;
+    if (typedRange) updated.affordable = true;
+    user.preferences = parsePreferences(updated); this.store.save(user);
+    const parts = [down.min || down.max ? `Downgrade profit ${formatMixedRange(down)}` : '', up.min || up.max ? `Upgrade overpay ${formatMixedRange(up)}` : '', typedRange ? `Any item worth ${formatRange(receive)}` : ''].filter(Boolean);
+    return this.panel(queryFromArgs(args), user, `✅ Filters saved.${parts.length ? ` ${parts.join(' · ')}.` : ''} They also apply to alerts.`);
   }
   /** One page of the trade list with a rendered Rolimons-style card per seller; a card that fails to render falls back to text. */
-  private async tradeList(result: SearchResult, query: SearchQuery, page: number, token: string) {
+  private async tradeList(result: SearchResult, query: SearchQuery, page: number, sendToken: string) {
     const { shown } = listPage(result, page);
-    const assetIds = shown.flatMap(e => [...e.best.give, ...e.best.receive].map(c => c.assetId));
-    const thumbnails = await this.search.provider.thumbnails?.(assetIds).catch(() => new Map<number, Buffer>()) ?? new Map<number, Buffer>();
+    const thumbnails = await this.thumbnails(shown.flatMap(e => [...e.best.give, ...e.best.receive].map(c => c.assetId)));
     const cards = new Map<number, Buffer>();
     await Promise.all(shown.map(async e => { try { cards.set(e.index, await renderTradeCard(e.best, thumbnails, bucketOf(e.best))); } catch (error) { console.error('Trade card render failed:', error instanceof Error ? error.message : 'Unknown error'); } }));
-    const files = shown.filter(e => cards.has(e.index)).map(e => new AttachmentBuilder(cards.get(e.index)!, { name: `trade-${e.index + 1}.png` }));
+    const files = shown.flatMap(e => { const png = cards.get(e.index); return png ? [new AttachmentBuilder(png, { name: `trade-${e.index + 1}.png` })] : []; });
     // Each seller's character render; a thumbnail outage just leaves the card without one.
     const characters = new Map<number, string>();
     await Promise.all(shown.map(async e => { const url = await this.search.provider.character?.(e.best.ad.userId).catch(() => null); if (url) characters.set(e.best.ad.userId, url); }));
-    return { ...tradeListMessage(result, query, await this.itemNames(), page, cards, characters, token), files };
+    return { ...tradeListMessage(result, query, { items: await this.itemNames(), page, cards, characters, sendToken }), files };
   }
-  /** Sets the find panel's target from a typed name/acronym/ID, offering a pick list when several items match. */
+  /** Every sendable offer a user holds, from searches and alert DMs alike; dropped whenever the account behind them changes. */
+  private forgetOffers(discordId: string): void {
+    this.results.delete(discordId);
+    for (const [token, alert] of this.alertOffers) if (alert.discordId === discordId) this.alertOffers.delete(token);
+  }
   /**
-   * Sets the find panel's targets from typed names/acronyms/IDs (comma separated). Ambiguous entries get a pick list whose
-   * choice is appended to the targets resolved so far; `append` adds to the existing targets instead of replacing them.
+   * Remembers a recommendation that is about to go out as an alert DM and returns the token its Place Trade button
+   * carries. Offers expire with RESULT_TTL, and a user keeps at most ALERTS_PER_USER of them, oldest dropped first.
+   */
+  alertOffer(discordId: string, offer: Recommendation, robloxId: number): string {
+    const now = Date.now();
+    for (const [token, alert] of this.alertOffers) if (now - alert.at > Bot.RESULT_TTL) this.alertOffers.delete(token);
+    const mine = [...this.alertOffers].filter(([, alert]) => alert.discordId === discordId);
+    for (const [token] of mine.slice(0, Math.max(0, mine.length - (Bot.ALERTS_PER_USER - 1)))) this.alertOffers.delete(token);
+    const token = randomBytes(16).toString('hex');
+    this.alertOffers.set(token, { offer, discordId, robloxId, at: now });
+    return token;
+  }
+  /**
+   * Sets the find panel's targets (upgrade) or give-aways (downgrade) from typed names/acronyms/IDs (comma separated).
+   * Ambiguous entries get a pick list whose choice is appended to the items resolved so far; `append` adds to the
+   * existing list instead of replacing it. Downgrade give-aways must each be an available copy the user owns.
    */
   private async setTarget(user: UserProfile, input: string, args: string[], append = false) {
     const items = (await this.search.provider.items()).data;
     const [mode = '-', results = '3', existing = '-'] = args;
     const downgrade = mode === 'downgrade';
-    const base = append && !downgrade ? parseQuery(mode, existing, results).targetIds : [];
-    const entries = input.split(/[,\n]+/).map(e => e.trim()).filter(Boolean);
+    const base = append ? parseQuery(mode, existing, results).targetIds : [];
+    const entries = entriesOf(input);
     if (!entries.length) throw new UserError('Enter at least one item.');
-    if (downgrade && entries.length > 1) throw new UserError('Downgrade one item at a time: name the single item you want to give away.');
-    if (base.length + entries.length > MAX_TARGETS) throw new UserError(`Search for up to ${MAX_TARGETS} items at once.`);
+    if (base.length + entries.length > MAX_TARGETS) throw new UserError(`${downgrade ? 'Give away' : 'Search for'} up to ${MAX_TARGETS} items at once.`);
     const resolved: Item[] = [];
+    let ambiguous: AmbiguousItemError | undefined;
     for (const entry of entries) {
       try { resolved.push(resolveItem(entry, items)); }
       catch (error) {
         if (!(error instanceof AmbiguousItemError)) throw error;
-        // Keep what already resolved so the pick completes the list rather than restarting it.
-        const soFar = [...new Set([...base, ...resolved.map(r => r.id)])];
-        return pickItemMessage(error.query, error.matches, ['target', mode, results, soFar.length ? ids.encodeList(soFar) : '-']);
+        ambiguous ??= error;
       }
     }
+    // Everything unambiguous is kept, so the pick completes the list rather than restarting it.
+    if (ambiguous) {
+      const soFar = [...new Set([...base, ...resolved.map(r => r.id)])].slice(0, MAX_TARGETS);
+      return pickItemMessage(ambiguous.query, ambiguous.matches, ['target', mode, results, soFar.length ? ids.encodeList(soFar) : '-']);
+    }
     const targetIds = [...new Set([...base, ...resolved.map(r => r.id)])].slice(0, MAX_TARGETS);
-    const label = (item: Item) => `**${item.name}**${item.acronym ? ` (${item.acronym})` : ''} · ID ${item.id}`;
+    const chosen = targetIds.map(id => items.get(id)).filter((i): i is Item => Boolean(i));
+    const query = { ...parseQuery(mode, '-', results), targetIds };
     if (downgrade) {
       const choices = await this.giveChoices(user);
-      if (!choices.some(c => c.id === targetIds[0])) throw new UserError(`You do not have an available copy of **${resolved[0]!.name}** to give (it may be on hold, projected or not in your public inventory).`);
-      return this.panel({ ...parseQuery(mode, '-', results), targetIds: [targetIds[0]!] }, user, `📤 You will give ${label(resolved[0]!)}.`);
+      const missing = resolved.find(r => !choices.some(c => c.id === r.id));
+      if (missing) throw new UserError(`You do not have an available copy of **${missing.name}** to give (it may be on hold, projected or not in your public inventory).`);
+      return this.panel(query, user, `📤 You will give ${chosen.map(itemLabel).join(', ')}.`);
     }
-    return this.panel({ ...parseQuery(mode, '-', results), targetIds }, user,
-      `🎯 ${targetIds.length > 1 ? `Targets set to ${targetIds.map(id => items.get(id)).filter((i): i is Item => Boolean(i)).map(label).join(', ')}` : `Target set to ${label(resolved[0]!)}`}.`);
+    return this.panel(query, user, `🎯 Target${chosen.length > 1 ? 's' : ''} set to ${chosen.map(itemLabel).join(', ')}.`);
   }
   /** Saves (or, for an empty range, removes) the profit window that applies when a trade brings in `itemId`. */
   private async setRule(user: UserProfile, itemId: number, range: Range) {
@@ -365,7 +414,7 @@ export class Bot {
   }
   /** Adds several comma/newline-separated items; the first ambiguous one opens a pick list after the rest are saved. */
   private async addMany(user: UserProfile, input: string) {
-    const entries = input.split(/[,\n]+/).map(e => e.trim()).filter(Boolean);
+    const entries = entriesOf(input);
     if (!entries.length) throw new UserError('Enter at least one item.');
     const items = (await this.search.provider.items()).data;
     const added: Item[] = []; const problems: string[] = []; let ambiguous: AmbiguousItemError | undefined;
@@ -381,8 +430,7 @@ export class Bot {
     if (next.length > 100) throw new UserError('This list holds up to 100 items; remove some first.');
     user.preferences.targetIds = next; this.store.save(user);
     if (ambiguous) return pickItemMessage(ambiguous.query, ambiguous.matches, ['addwatch']);
-    const label = (item: Item) => `**${item.name}**${item.acronym ? ` (${item.acronym})` : ''} · ID ${item.id}`;
-    const note = [added.length ? `⭐ Now watching ${added.map(label).join(', ')}.` : '', ...problems.map(p => `⚠️ ${p}`)].filter(Boolean).join('\n');
+    const note = [added.length ? `⭐ Now watching ${added.map(itemLabel).join(', ')}.` : '', ...problems.map(p => `⚠️ ${p}`)].filter(Boolean).join('\n');
     return itemsPanel(user, items, note || undefined);
   }
   /** Several menu picks at once: every chosen item leaves the list in one go. */
@@ -393,7 +441,7 @@ export class Bot {
     const names = removed.map(id => `**${items?.get(id)?.name ?? `item ${id}`}**`).join(', ');
     return itemsPanel(user, items, removed.length ? `➖ Removed ${names}.` : 'Nothing to remove.');
   }
-  /** The settings hub: account, alerts, mode, demand, lists and archive coverage. */
+  /** The settings hub: account, filters, lists and archive coverage. */
   private async settings(user: UserProfile, note?: string) {
     return settingsMessage(user, await this.itemNames(), await this.avatar(user.robloxId), this.search.coverage(), note);
   }
@@ -419,18 +467,18 @@ export class Bot {
     const inventory = await this.search.provider.inventory(roblox.id);
     const user = this.store.link(discordId, roblox.id, roblox.name);
     this.trading.cancelVerification(discordId);
-    this.results.delete(discordId);
+    this.forgetOffers(discordId);
     // The optional form box seeds the wanted list; unmatched entries are reported, not fatal.
     const notes: string[] = [];
     if (wanted.trim()) {
       const items = (await this.search.provider.items()).data;
       const found: string[] = [], missed: string[] = [];
-      for (const entry of wanted.split(/[,\n]+/).map(e => e.trim()).filter(Boolean).slice(0, 100)) {
+      for (const entry of entriesOf(wanted).slice(0, 100)) {
         try { const item = resolveItem(entry, items); user.preferences.targetIds = [...new Set([...user.preferences.targetIds, item.id])]; found.push(item.name); }
         catch (error) { missed.push(error instanceof AmbiguousItemError ? `${entry.slice(0, 30)} (did you mean ${error.matches.slice(0, 3).map(m => m.acronym || m.name).join(', ')}?)` : entry.slice(0, 30)); }
       }
       if (found.length) notes.push(`⭐ Wanted: **${found.join(', ')}**`);
-      if (missed.length) notes.push(`⚠️ Not recognised as wanted items: ${missed.join(', ')} — add them later from **Wanted items**.`);
+      if (missed.length) notes.push(`⚠️ Not recognised as wanted items: ${missed.join(', ')} — add them later from **Edit wanted items**.`);
       this.store.save(user);
     }
     return linkMessage(roblox, visibleHoldings(inventory.holdings).length, await this.avatar(roblox.id), notes.join('\n'));
@@ -457,15 +505,11 @@ export class Bot {
   }
   private async inventory(user: UserProfile, view: InventoryView = 'grid', page = 0) {
     const [inventory, items] = await Promise.all([this.search.provider.inventory(user.robloxId, undefined, user), this.search.provider.items()]);
-    const available = priced(inventory, items.data);
-    const total = totals(available);
+    const total = totals(priced(inventory, items.data));
     const entries = groupInventory(inventory, items.data);
     const paged = paginate(entries, page, PAGE_SIZE[view]);
     const files: AttachmentBuilder[] = [];
-    if (view === 'grid') {
-      const thumbnails = await this.search.provider.thumbnails?.(paged.items.map(e => e.assetId)).catch(() => new Map<number, Buffer>()) ?? new Map<number, Buffer>();
-      files.push(new AttachmentBuilder(await renderInventoryGrid(paged.items, thumbnails), { name: 'inventory.png' }));
-    }
+    if (view === 'grid') files.push(new AttachmentBuilder(await renderInventoryGrid(paged.items, await this.thumbnails(paged.items.map(e => e.assetId))), { name: 'inventory.png' }));
     const copies = entries.reduce((n, e) => n + e.quantity, 0);
     const message = inventoryMessage(user, { view, ...paged, entries: paged.items, total: entries.length, copies, value: total.value, rap: total.rap, note: inventory.tradabilityError }, await this.avatar(user.robloxId));
     return { ...message, files };
@@ -478,28 +522,22 @@ export class Bot {
     for (const [id, at] of this.lastSearch) if (Date.now() - at > 60_000) this.lastSearch.delete(id);
   }
   /**
-   * Runs the finder in one of its two modes. The mode fixes the value window and the ranking; the user's extra filters
-   * (profit range, per-item rules, RAP, demand, ad age) apply on top.
+   * Runs the finder in one of its modes. The mode fixes the trade shape and the ranking; the user's own filters
+   * (profit and overpay windows, per-item rules, receive range, ad age) apply on top.
    */
   private async find(i: Replyable, user: UserProfile, query: SearchQuery): Promise<void> {
     const mode = findMode(query);
-    if (mode === 'downgrade' && !query.targetIds[0]) throw new UserError('Pick which of your items to give away first.');
+    if (mode === 'downgrade' && !query.targetIds.length) throw new UserError('Pick which of your items to give away first.');
     this.cooldown(user.discordId);
     // The window is the user's own: at most the loss they accept, and any gain above it. The mode only shapes the trade and the ranking.
     const prefs = { ...user.preferences, mode: mode === 'both' ? 'any' as const : mode, maxValueGainPct: null };
     if (mode !== 'downgrade' && query.targetIds.length) prefs.targetIds = query.targetIds;
     if (mode === 'downgrade') prefs.targetIds = [];
-    // Every mode wants the same thing: the trades that best do what their shape is for, biggest items first.
-    // The search ranks that way by default, so no mode needs an ordering of its own.
-    const result = await this.search.search(user, prefs, { giveOnly: mode === 'downgrade' ? query.targetIds[0] : undefined });
+    // The search already ranks every shape by what that shape is for, biggest items first, so no mode needs an ordering
+    // of its own. Downgrade: each chosen item is its own candidate, given alone for a bundle of the seller's.
+    const result = await this.search.search(user, prefs, { giveOnly: mode === 'downgrade' ? query.targetIds : undefined });
     // "Both" alternates upgrade-shaped and downgrade-shaped sellers so one shape never crowds the other out of the list.
-    if (mode === 'both') {
-      const isDown = (r: Recommendation) => r.mode === 'downgrade';
-      const ups = result.recommendations.filter(r => !isDown(r)), downs = result.recommendations.filter(isDown);
-      const mixed: Recommendation[] = [];
-      for (let i = 0; i < Math.max(ups.length, downs.length); i++) { if (ups[i]) mixed.push(ups[i]!); if (downs[i]) mixed.push(downs[i]!); }
-      result.recommendations = mixed;
-    }
+    if (mode === 'both') result.recommendations = interleave(result.recommendations.filter(r => r.mode !== 'downgrade'), result.recommendations.filter(r => r.mode === 'downgrade'));
     const token = randomBytes(16).toString('hex');
     this.trading.cancelVerification(user.discordId);
     for (const [id, cached] of this.results) if (Date.now() - cached.at > Bot.RESULT_TTL) this.results.delete(id);
@@ -535,7 +573,8 @@ export class Bot {
     const partner = await this.search.provider.user(partnerInput);
     if (partner.id === user.robloxId) throw new UserError('Choose a different trade partner.');
     const [own, theirs, items] = await Promise.all([this.search.provider.inventory(user.robloxId, 0, user), this.search.provider.inventory(partner.id, 0, user), this.search.provider.items()]);
-    if (own.tradabilityError || theirs.tradabilityError) throw new UserError(own.tradabilityError ?? theirs.tradabilityError!);
+    const unverified = own.tradabilityError ?? theirs.tradabilityError;
+    if (unverified) throw new UserError(unverified);
     if ([own.fetchedAt, theirs.fetchedAt, items.fetchedAt].some(at => Date.now() - at > 300_000))
       throw new UserError('An inventory or price snapshot became stale during analysis. Please retry.');
     const give = selectCopies(giveIds, priced(own, items.data)), receive = selectCopies(receiveIds, priced(theirs, items.data));

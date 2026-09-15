@@ -47,7 +47,7 @@ test('RAP fallback does not turn negative unassigned values into negative prices
   const c = copy(1, 100); c.item.value = null;
   assert.equal(effectiveValue(c.item), 100);
   const r = evaluate([c], [copy(2, 56), copy(3, 56)], defaults());
-  assert.equal(r.passes, true); assert.match(r.warnings.join(' '), /No assigned Rolimons value for Item 1: RAP counts as the value/);
+  assert.equal(r.passes, true); assert.doesNotMatch(r.warnings.join(' '), /No assigned Rolimons value|RAP counts as the value/);
 });
 test('risk and user preference constraints reject unsafe or unwanted incoming trades', () => {
   for (const [override, prefs] of [

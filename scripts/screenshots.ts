@@ -10,8 +10,7 @@ import { SearchService } from '../src/search.js';
 import { evaluate, priced, selectCopies } from '../src/engine.js';
 import { groupInventory } from '../src/inventory.js';
 import {
-  alertsMessage, errorMessage, helpMessage, inventoryMessage, linkMessage, recommendationMessage,
-  profitMessage, searchMessage, settingsMessage,
+  alertMessage, alertsMessage, analysisMessage, errorMessage, helpMessage, inventoryMessage, linkMessage, profitMessage, settingsMessage, tradeListMessage,
 } from '../src/presentation.js';
 
 const item = (id: number, name: string, acronym: string, value: number | null, rap: number, extra: Partial<Item> = {}): Item =>
@@ -48,8 +47,9 @@ const panels: Record<string, { embeds: { toJSON(): APIEmbed }[]; components: { t
   profit: profitMessage(user, items, '✅ Profit filters updated.'),
   settings: settingsMessage(user, items, ownAvatar),
   inventory: { ...inventoryMessage(user, { view: 'text', page: 0, pages: 1, entries: groupInventory(inventory(1, [1029025, 1031429, 21070012, 1235488]), items), total: 4, copies: 4, value: 391_000, rap: 381_600 }, ownAvatar), files: [1] },
-  search: searchMessage(result, { mode: 'upgrade', targetIds: [1365767], results: 3 }, items),
-  recommendation: recommendationMessage(rec, { alert: true, avatar: partnerAvatar }),
+  search: tradeListMessage(result, { mode: 'upgrade', targetIds: [1365767], results: 3 }, { items, characters: new Map([[rec.ad.userId, partnerAvatar]]) }),
+  recommendation: alertMessage(rec, { character: partnerAvatar }),
+  analyze: analysisMessage(failing, { id: 2, name: 'LimitedFlipper' }, partnerAvatar),
   alerts: alertsMessage(user),
   error: { embeds: [...(errorMessage('Please wait 12 more seconds between searches or analyses.').embeds as { toJSON(): APIEmbed }[])], components: [] },
 };
@@ -102,7 +102,7 @@ function rowHtml(r: APIActionRowComponent<APIComponentInMessageActionRow>): stri
   }).join('');
   return `<div class="row">${parts}</div>`;
 }
-const page = (name: string, p: (typeof panels)[string]) => `<!doctype html><html><head><meta charset="utf-8"><style>
+const page = (p: (typeof panels)[string]) => `<!doctype html><html><head><meta charset="utf-8"><style>
   body{margin:0;background:#313338;font-family:"gg sans","Noto Sans","Segoe UI",Helvetica,Arial,sans-serif;color:#dbdee1;font-size:15px;line-height:1.375}
   .msg{display:flex;gap:16px;padding:18px 24px 20px 20px;width:640px}
   .avatar{width:40px;height:40px;border-radius:50%;background:#5865f2;display:flex;align-items:center;justify-content:center;font-size:22px;flex:none}
@@ -139,5 +139,5 @@ const page = (name: string, p: (typeof panels)[string]) => `<!doctype html><html
 
 const dir = 'docs/screenshots/html';
 mkdirSync(dir, { recursive: true });
-for (const [name, p] of Object.entries(panels)) writeFileSync(`${dir}/${name}.html`, page(name, p));
+for (const [name, p] of Object.entries(panels)) writeFileSync(`${dir}/${name}.html`, page(p));
 console.log(`Wrote ${Object.keys(panels).length} panels to ${dir}. Run: python3 scripts/screenshot.py`);

@@ -11,7 +11,7 @@ import { RobloxTradesClient, TradingService, TradeVerificationRequired, parseCha
 import { SearchService } from '../src/search.js';
 import { Bot } from '../src/bot.js';
 import { RobloxThrottle } from '../src/roblox-throttle.js';
-import { connectModal, tradeListMessage, verificationMessage, verificationModal } from '../src/presentation.js';
+import { alertMessage, connectModal, tradeListMessage, verificationMessage, verificationModal } from '../src/presentation.js';
 import { finderProvider, profile } from './fixtures.js';
 
 const key = 'ab'.repeat(32);
@@ -243,7 +243,7 @@ test('definite rejection allows a later explicit click, but challenge and rate l
 });
 
 test('expired sessions are removed and sanitized, and failed connections preserve the previous account', async () => {
-  const { store, service, recommendation, state, fetcher, throttle } = await setup();
+  const { store, recommendation, state, fetcher, throttle } = await setup();
   try {
     const rejected = new TradingService(store, (async () => json({ errors: [{ message: secret }] }, 401)) as typeof fetch);
     await assert.rejects(rejected.connect('123', 'invalid-session'), /expired or was rejected/); assert.equal(store.session('123', 1), secret);
@@ -287,8 +287,8 @@ test('Discord connect → find → Place Trade is private, bound to the search/a
     assert.equal(store.get('123')?.robloxId, 1);
     assert.deepEqual(connect.calls[0], { method: 'deferReply', body: { flags: MessageFlags.Ephemeral } });
     assert.equal(JSON.stringify(connect.calls).includes(secret), false);
-    const alias = interaction(''); Object.assign(alias.fake, { commandName: 'find', options: { getSubcommand: () => 'trades' } });
-    await bot.handle(alias.fake as unknown as ChatInputCommandInteraction); assert.match(JSON.stringify(alias.calls), /Find trades/);
+    const finder = interaction(''); Object.assign(finder.fake, { commandName: 'trade' });
+    await bot.handle(finder.fake as unknown as ChatInputCommandInteraction); assert.match(JSON.stringify(finder.calls), /Find trades/);
     const find = interaction('tf:find:upgrade:u:3'); await bot.component(find.i);
     const output = JSON.stringify(find.calls); const placeId = output.match(/tf:place:[a-f0-9]+:0/)?.[0]; assert.ok(placeId);
     const wrong = interaction(placeId, undefined, '456'); store.link('456', 1, 'OtherDiscord'); await bot.component(wrong.i);
@@ -317,11 +317,41 @@ test('Discord connect → find → Place Trade is private, bound to the search/a
   } finally { store.close(); }
 });
 
+test('alert DM Place Trade sends the stored offer for its own user only, and expires with the token', async () => {
+  const store = new Store(':memory:', undefined, key), mock = api(), search = new SearchService(finderProvider());
+  const bot = new Bot(store, search, 60, new TradingService(store, mock.fetcher, mock.throttle));
+  try {
+    await bot.component(interaction('tf:connect', { cookie: secret }).i); assert.equal(store.get('123')?.robloxId, 1);
+    const offer = (await search.search(profile())).recommendations[0]!;
+    // The monitor stores the offer before sending the DM; the DM's button carries only the token.
+    const token = bot.alertOffer('123', offer, 1);
+    const dm = alertMessage(offer, { placeToken: token });
+    const placeId = (dm.components[1]!.toJSON().components[0] as { custom_id: string }).custom_id; assert.equal(placeId, `tf:placealert:${token}`);
+    // Another Discord user with the same button gets nothing sent, and neither does a tampered ID.
+    store.link('456', 1, 'OtherDiscord');
+    const wrong = interaction(placeId, undefined, '456'); await bot.component(wrong.i); assert.match(JSON.stringify(wrong.calls), /expired or belongs to another account/); assert.equal(mock.state.posts, 0);
+    const tampered = interaction(`${placeId}:0`); await bot.component(tampered.i); assert.match(JSON.stringify(tampered.calls), /expired/); assert.equal(mock.state.posts, 0);
+    // A DM is not ephemeral, so the click gets a fresh private reply rather than an edit of the alert.
+    const place = interaction(placeId); (place.fake.message as { flags: { has: () => boolean } }).flags.has = () => false; await bot.component(place.i);
+    assert.deepEqual(place.calls[0], { method: 'deferReply', body: { flags: MessageFlags.Ephemeral } });
+    assert.match(JSON.stringify(place.calls), /Outbound trade sent/); assert.equal(mock.state.posts, 1);
+    const sent = JSON.parse(String(mock.calls.find(c => c.path.endsWith('/trades/send'))!.init.body)) as TradeRequest;
+    assert.equal(sent.senderOffer.userId, 1); assert.equal(sent.recipientOffer.userId, offer.ad.userId); assert.equal(sent.senderOffer.collectibleItemInstanceIds.length, offer.give.length);
+    // Expiry and an account switch both close the token; the cache stays bounded per user.
+    bot['alertOffers'].get(token)!.at -= 16 * 60_000;
+    const expired = interaction(placeId); await bot.component(expired.i); assert.match(JSON.stringify(expired.calls), /expired/); assert.equal(mock.state.posts, 1);
+    const fresh = bot.alertOffer('123', offer, 1); store.link('123', 2, 'NewAccount');
+    const switched = interaction(`tf:placealert:${fresh}`); await bot.component(switched.i); assert.match(JSON.stringify(switched.calls), /expired/); assert.equal(mock.state.posts, 1);
+    for (let n = 0; n < 30; n++) bot.alertOffer('123', offer, 1);
+    assert.equal([...bot['alertOffers'].values()].filter(a => a.discordId === '123').length, 20);
+  } finally { store.close(); }
+});
+
 test('result rows with Place Trade stay within Discord limits', async () => {
   const result = await new SearchService(finderProvider()).search(profile());
   const first = result.recommendations[0]!;
   result.recommendations = Array.from({ length: 8 }, (_, index) => ({ ...first, ad: { ...first.ad, userId: index + 2 } }));
-  const panel = tradeListMessage(result, { mode: 'upgrade', targetIds: [30], results: 3 }, undefined, 0, undefined, undefined, 'a'.repeat(32));
+  const panel = tradeListMessage(result, { mode: 'upgrade', targetIds: [30], results: 3 }, { sendToken: 'a'.repeat(32) });
   assert.ok(panel.components.length <= 5);
   const rows = panel.components.map(row => row.toJSON());
   assert.equal(rows.flatMap(r => r.components).filter(c => 'custom_id' in c && c.custom_id.startsWith('tf:place:')).length, 5);

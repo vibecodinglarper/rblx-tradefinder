@@ -28,7 +28,7 @@ test('a retained Rose Amazeface is permanently untradable: kept in the holdings 
   const body = inventoryMessage(profile(), { view: 'text', page: 0, pages: 1, entries, copies: 1, total: 1, value: 50, rap: 50 });
   const text = body.embeds![0]!.toJSON().description!;
   assert.doesNotMatch(text, /Rose Amazeface/);
-  assert.match(text, /Item 10.*✅ Tradable/);
+  assert.match(text, /Item 10\]\(.*\) · V 50 · RAP 50\n?/); assert.doesNotMatch(text, /Tradable/);
   const legacy = { ...inv.holdings[0]!, item: prices.get(rose)! };
   const recipient = { ...inventory(2, [20]).holdings[0]!, item: item(20, 4120) };
   assert.equal(evaluate([legacy], [recipient], defaults(), true).passes, false);
@@ -56,7 +56,7 @@ test('copy counts and hold status come from verified instances; stale extra copi
   // The held copy is only temporarily untradable, so it stays in view; the stale public row is gone for good and is not shown.
   const entry = groupInventory(inv, prices)[0]!;
   assert.equal(entry.quantity, 2);
-  assert.deepEqual(entry.tags, ['1/2 tradable', '1 on hold']);
+  assert.deepEqual(entry.tags, ['1 on hold']);
   assert.ok(raw.holdings.every(c => c.tradable === true && !c.onHold), 'reconciliation must not mutate shared public snapshots');
 });
 

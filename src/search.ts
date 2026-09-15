@@ -2,8 +2,8 @@ import { effectiveValue, UserError, type Holding, type Inventory, type Preferenc
 import { affordableRange, evaluate, outgoingBundles, priced, propose, REALISTIC_GAIN_PCT, recommendationKey, sameAssets, shapeDistance, sizeBand, type Evaluation, type Recommendation, type PricedCopy } from './engine.js';
 
 export interface SearchOptions {
-  /** Only offer copies of this item (downgrade mode: one item given for several received). */
-  giveOnly?: number;
+  /** Only offer these items, one at a time (downgrade mode: each chosen item alone for several of the seller's). */
+  giveOnly?: number[];
   /** Ranking key, lower first; defaults to the heuristic score descending. */
   rank?: (r: Evaluation) => number;
 }
@@ -43,7 +43,8 @@ export class SearchService {
       this.provider.inventory(user.robloxId, 0, user),
       this.provider.inventory(recommendation.ad.userId, 0, user), this.provider.items(),
     ]);
-    if (own.tradabilityError || partner.tradabilityError) throw new UserError(own.tradabilityError ?? partner.tradabilityError!);
+    const unverified = own.tradabilityError ?? partner.tradabilityError;
+    if (unverified) throw new UserError(unverified);
     if ([own.fetchedAt, partner.fetchedAt, items.fetchedAt].some(at => Date.now() - at > 300_000))
       throw new UserError('Inventory verification became stale. The alert was not sent.');
     if (Date.now() - recommendation.ad.createdAt > user.preferences.maxAdAgeMinutes * 60_000) return null;
@@ -76,14 +77,22 @@ export class SearchService {
     const [items, adSnapshot, inventory] = await Promise.all([this.provider.items(), this.provider.ads(), this.provider.inventory(user.robloxId, undefined, user)]);
     if (inventory.tradabilityError) throw new UserError(inventory.tradabilityError);
     let own = priced(inventory, items.data);
-    if (options.giveOnly !== undefined) {
-      const copy = own.find(c => c.assetId === options.giveOnly);
-      if (!copy) throw new UserError('You do not have an available, non-projected copy of that item to give.');
-      own = [copy];
+    // Downgrade: every chosen item must be giveable, and one copy each is all a single-item give can use.
+    const giveOnly = options.giveOnly ?? [];
+    const single = giveOnly.length > 0;
+    if (single) {
+      const missing = giveOnly.filter(id => !own.some(c => c.assetId === id));
+      if (missing.length) throw new UserError(`You do not have an available, non-projected copy of ${missing.map(id => `**${items.data.get(id)?.name ?? `item ${id}`}**`).join(', ')} to give.`);
+      own = [...new Map(own.filter(c => giveOnly.includes(c.assetId)).map(c => [c.assetId, c])).values()];
     }
     if (!own.length) throw new UserError('No verified tradable, non-projected items with supported Rolimons prices were found in this public inventory.');
     // "Affordable" without a typed range means the band this inventory can pay for; alerts get the same treatment.
-    if (p.affordable && p.minReceiveValue === null && p.maxReceiveValue === null) p = { ...p, ...affordableRange(own, REALISTIC_GAIN_PCT) };
+    if (p.affordable && p.minReceiveValue === null && p.maxReceiveValue === null) {
+      // Chosen give-aways are searched one at a time, so the band runs from the cheapest of them, not the best.
+      const band = affordableRange(own, REALISTIC_GAIN_PCT);
+      const cheapest = Math.min(...own.map(c => effectiveValue(c.item)));
+      p = { ...p, ...band, ...(single && band ? { minReceiveValue: cheapest } : {}) };
+    }
     const inBand = (ad: TradeAd) => {
       if (!p.affordable) return true;
       const values = ad.offering.map(id => effectiveValue(items.data.get(id)!));
@@ -94,7 +103,7 @@ export class SearchService {
     // or whose whole offer sits under the smallest, cannot produce one. Two multiplications rule it out before the
     // combinatorics, which is where nearly all the time goes.
     const ownValues = own.map(c => effectiveValue(c.item)).sort((a, b) => b - a);
-    const largestBundle = ownValues.slice(0, 4).reduce((n, v) => n + v, 0);
+    const largestBundle = single ? ownValues[0] ?? 0 : ownValues.slice(0, 4).reduce((n, v) => n + v, 0);
     const smallestBundle = ownValues[ownValues.length - 1] ?? 0;
     const reachable = (ad: TradeAd) => {
       let cheapest = Infinity, total = 0;
@@ -120,12 +129,16 @@ export class SearchService {
     const ads = pool.filter(a => a.userId !== user.robloxId && a.createdAt <= now + 60_000
       && now - a.createdAt <= p.maxAdAgeMinutes * 60_000 && a.offering.length && !a.offeringRobux && !a.requestingRobux
       && a.offering.every(id => items.data.has(id)) && (!p.targetIds.length || a.offering.some(id => p.targetIds.includes(id))) && inBand(a) && reachable(a));
-    const { bundles, truncated } = outgoingBundles(own, ads);
+    const built = outgoingBundles(own, ads); let bundles = built.bundles; const { truncated } = built;
+    // Several chosen give-aways are separate candidates, never combined: only the single-item bundles stay, and an ad
+    // that asks for exactly several of them is not a downgrade of any one of them.
+    if (single) { const ones = bundles.bySize[1] ?? []; bundles = { all: ones, bySize: [[], ones] }; }
+    const oneGive = (r: { give: unknown[] }) => !single || r.give.length === 1;
     const bySeller = new Map<number, { ads: TradeAd[]; score: number }>();
     // Price-screen every recent ad before spending requests on seller inventories.
     for (const ad of ads) {
       const advertised = ad.offering.map((assetId, i) => ({ assetId, userAssetId: -(i + 1), onHold: false, tradable: true, item: items.data.get(assetId)! }));
-      const previews = propose(ad, own, advertised, bundles, p);
+      const previews = propose(ad, own, advertised, bundles, p).filter(oneGive);
       if (!previews.length) continue;
       const existing = bySeller.get(ad.userId) ?? { ads: [], score: -Infinity };
       existing.ads.push(ad); existing.score = Math.max(existing.score, previews[0]!.score);
@@ -157,7 +170,7 @@ export class SearchService {
       }
       const partner = priced(outcome.inventory, items.data);
       for (const ad of outcome.candidate.ads) {
-        for (const result of propose(ad, own, partner, bundles, p)) recommendations.push({ ...result,
+        for (const result of propose(ad, own, partner, bundles, p).filter(oneGive)) recommendations.push({ ...result,
           ownInventoryAt: inventory.fetchedAt, partnerInventoryAt: outcome.inventory.fetchedAt, pricesAt: items.fetchedAt });
       }
     }

@@ -1,4 +1,4 @@
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { AttachmentBuilder, Client, Events, GatewayIntentBits } from 'discord.js';
 import { config } from './config.js';
 import { Providers } from './providers.js';
 import { TradingService } from './trading.js';
@@ -7,9 +7,9 @@ import { Store } from './store.js';
 import { Bot } from './bot.js';
 import { Monitor } from './monitor.js';
 import { startHealthServer } from './health.js';
-import { alertMessage, bucketOf, inventoryChangeMessage, setStatIcons } from './presentation.js';
+import { alertMessage, inventoryChangeMessage, setStatIcons } from './presentation.js';
+import { bucketOf } from './engine.js';
 import { iconPng, renderInventoryChangeCard, renderTradeCard } from './render.js';
-import { AttachmentBuilder } from 'discord.js';
 
 /** Uploads the Rolimons and old Robux icons as application emojis once, then uses them in text panels. */
 async function ensureIcons(client: Client): Promise<void> {
@@ -61,7 +61,7 @@ async function main() {
   };
   const collector = setInterval(() => { void collect(); }, 60_000);
   const bot = new Bot(store, search, env.POLL_INTERVAL_SECONDS, trading);
-  const monitor = new Monitor(store, search, async (id, r) => {
+  const monitor = new Monitor(store, search, async (id, r, owner) => {
     const user = await client.users.fetch(id);
     // Same card as the trade finder; the rendered image is decoration, so a render failure falls back to text.
     const character = await providers.character(r.ad.userId).catch(() => null);
@@ -70,7 +70,9 @@ async function main() {
       const thumbnails = await providers.thumbnails([...r.give, ...r.receive].map(c => c.assetId)).catch(() => new Map<number, Buffer>());
       files = [new AttachmentBuilder(await renderTradeCard(r, thumbnails, bucketOf(r)), { name: 'trade-1.png' })];
     } catch (error) { console.error('Alert card failed:', error instanceof Error ? error.message : 'Unknown error'); }
-    await user.send({ ...alertMessage(r, { card: files.length > 0, character }), files });
+    // The DM's Place Trade button sends this exact offer; the bot keeps it for 15 minutes under a token the button carries.
+    const placeToken = bot.alertOffer(id, r, owner.robloxId);
+    await user.send({ ...alertMessage(r, { card: files.length > 0, character, placeToken }), files });
     console.log(`Alert DM sent to ${id}: seller ${r.ad.userId}, ${r.valueGain >= 0 ? '+' : ''}${r.valueGain} value.`);
   }, env.POLL_INTERVAL_SECONDS * 1000, async (user, change, checkedAt) => {
     const recipient = await client.users.fetch(user.discordId);
@@ -90,7 +92,7 @@ async function main() {
   });
   client.once(Events.ClientReady, ready => { console.log(`Tradefinder connected as ${ready.user.tag}`); void ensureIcons(client); void collect(); monitor.start(); });
   client.on(Events.InteractionCreate, interaction => {
-    const task = interaction.isAutocomplete() ? bot.autocomplete(interaction) : interaction.isChatInputCommand() ? bot.handle(interaction)
+    const task = interaction.isChatInputCommand() ? bot.handle(interaction)
       : interaction.isMessageComponent() || interaction.isModalSubmit() ? bot.component(interaction) : undefined;
     void task?.catch(error => console.error('Interaction error:', error instanceof Error ? error.name : 'Unknown error'));
   });
